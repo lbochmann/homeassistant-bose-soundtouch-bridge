@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.6.2
+
+- On startup, the bridge now logs a copy-paste-ready YAML block listing
+  every discovered SoundTouch by its friendly name. Use this to extend
+  `speakers:` with per-speaker overrides without having to type or guess
+  the names. (Home Assistant doesn't let add-ons pre-populate the
+  Configuration form dynamically, so the log is the closest equivalent.)
+- README rewritten to document the auto-discovery flow, the per-speaker
+  override workflow, and the HTTP-only limitation (SoundTouch firmware
+  has no working HTTPS client for stream playback).
+
 ## 1.6.1
 
 - **UX fix:** preset URLs are now top-level fields again

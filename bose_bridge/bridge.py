@@ -244,6 +244,18 @@ def resolve_speakers(cfg_speakers: list[dict]) -> list[dict]:
                 print(f"[cfg] could not read /info from {ip}: {e}")
         if not discovered:
             print("[cfg] SSDP discovery returned no speakers")
+        elif not explicit:
+            # No per-speaker overrides configured — print a copy-paste-ready
+            # YAML block so users can extend the config without having to
+            # type or guess the speaker names. (HA's add-on schema can't be
+            # populated dynamically, so this log hint is the closest we can
+            # get to "auto-filling the form".)
+            print("[cfg] to override presets for a specific speaker, copy one of these names into `speakers:`")
+            print("[cfg]")
+            for _, _, friendly, _ in discovered:
+                print(f'[cfg]     - name: "{friendly}"')
+                print(f'[cfg]       preset_1_url: "http://your-stream.example/stream.mp3"')
+            print("[cfg]")
 
     resolved: list[dict] = []
     used_ids: set[str] = set()
