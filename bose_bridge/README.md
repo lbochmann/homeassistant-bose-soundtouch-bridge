@@ -26,13 +26,6 @@ the firmware.
   managed by the Supervisor). For Home Assistant Container / plain
   Docker, use the standalone image — see the top-level README.
 
-## Install
-
-1. In Home Assistant: **Settings → Add-ons → App Store → ⋮ → Repositories**
-2. Add this repository's GitHub URL.
-3. The "Bose SoundTouch Bridge" add-on appears in the store — click
-   **Install** → **Configuration** (see below) → **Start**.
-
 ## Configuration
 
 ### Easy mode — same presets on every speaker
@@ -40,8 +33,8 @@ the firmware.
 Fill in the six top-level `preset_N_url` fields and leave `speakers:`
 empty. The bridge discovers every SoundTouch on the LAN via SSDP at
 startup and applies these presets to all of them — no IPs, no
-hostnames, no manual list of devices. New speakers added to the network
-later are picked up on the next restart.
+hostnames, no manual list of devices. New speakers added to the
+network later are picked up on the next restart.
 
 ```yaml
 preset_1_url: "http://icecast.vrtcdn.be/radio1-high.mp3"
@@ -49,9 +42,9 @@ preset_2_url: "http://icecast.vrtcdn.be/stubru-high.mp3"
 speakers: []
 ```
 
-After **Save → Start**, the **Log** tab should show one block per
-speaker (`[upnp] / [sync] / [ws]`), and pressing any preset button on
-any speaker plays the corresponding stream.
+After **Save → Start**, the **Log** tab should show one
+`[upnp] / [sync] / [ws]` block per discovered speaker. Press a preset
+button on any of them and the configured stream should play.
 
 ### Per-speaker overrides
 
@@ -93,23 +86,26 @@ across entries.
 
 > Why isn't the speaker list auto-filled into the Configuration form?
 > Home Assistant renders the form from a static schema *before* the
-> add-on starts, so the add-on has no way to push live discovery results
-> back into the UI. The log hint is the closest equivalent.
+> add-on starts, so the add-on has no way to push live discovery
+> results back into the UI. The log hint is the closest equivalent.
 
-Leave `sync_presets_on_startup` enabled (default). On startup the
-add-on writes each configured URL into the speaker's matching preset
-slot — required so physical button presses emit the WebSocket event the
-bridge listens for. Skip-when-equal makes restarts cheap.
+### Preset sync on startup
 
-After **Save → Start**, check the **Log** tab. You should see one
-`[upnp] / [sync] / [ws]` block per managed speaker. Press a preset
-button on any of them and the configured stream should play.
+`sync_presets_on_startup` (default `true`) writes each configured URL
+into the speaker's matching preset slot at startup. This is what
+makes physical button presses emit the WebSocket event the bridge
+listens for — without sync, factory-reset speakers stay silent on
+button presses. Sync skips slots already in the right state, so
+restarts are cheap.
 
-For HA control: with the Mosquitto Broker add-on running and the MQTT
-integration configured in HA Core, six `button.bose_<id>_preset_N`
-entities per speaker auto-appear via MQTT discovery. Pressing one in
-the HA UI / automations / scripts plays the same URL the physical
-button would.
+### Home Assistant control buttons
+
+With the Mosquitto Broker add-on running and the MQTT integration
+configured in HA Core, the bridge publishes MQTT-discovery configs so
+six `button.bose_<id>_preset_N` entities per speaker auto-appear in
+HA. Pressing one in the HA UI / automations / scripts plays the same
+URL the physical button would. Falls back gracefully if MQTT is
+unavailable — only physical buttons keep working.
 
 ## Example URLs (Belgian / Flemish radio)
 
@@ -122,9 +118,8 @@ button would.
 | 6 | VRT Nieuwsbrief | `http://progressive-audio.vrtcdn.be/content/fixed/11_11niws-snip_hi.mp3` |
 
 For other stations, look up the direct stream URL on the broadcaster's
-website (search for `icecast`, `mp3`, or `aac`). Some commercial stations
-hide their URL behind authenticated tokens — those won't work without an
-extra proxy and are out of scope for this add-on.
+website (search for `icecast`, `mp3`, or `aac`). See *Limitations*
+below for HTTPS and token-protected streams.
 
 ## How it works
 
@@ -155,8 +150,8 @@ has no working HTTPS client for stream playback. Practical implications:
   playlist and read the underlying URL.
 - If a station genuinely doesn't offer HTTP, you need a reverse proxy
   in your network that fronts the HTTPS source over plain HTTP (e.g.
-  nginx with `proxy_pass`, or any Icecast relay). Out of scope for this
-  add-on for now — a built-in HTTPS→HTTP proxy is on the roadmap.
+  nginx with `proxy_pass`, or any Icecast relay). Out of scope for
+  this add-on for now — a built-in HTTPS→HTTP proxy is on the roadmap.
 
 ### Token-protected commercial streams
 
