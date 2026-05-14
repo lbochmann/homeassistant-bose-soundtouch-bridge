@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.6.1
+
+- **UX fix:** preset URLs are now top-level fields again
+  (`preset_1_url` .. `preset_6_url`), so the add-on Configuration tab
+  shows the preset slots immediately — no need to add a speaker entry
+  first. When set, they act as a default wildcard preset map applied to
+  every discovered speaker. The `speakers:` list keeps its role for
+  per-speaker overrides by `name` or `host`.
+- Same shortcut for the standalone image: `PRESET_1_URL` ..
+  `PRESET_6_URL` env vars re-added with the new wildcard semantics
+  (alongside the per-speaker `SPEAKERS_JSON`).
+
 ## 1.6.0 — fork of [sandervg/homeassistant-bose-soundtouch-bridge](https://github.com/sandervg/homeassistant-bose-soundtouch-bridge) 1.5.0
 
 - **Multi-speaker support.** A single bridge instance now manages every

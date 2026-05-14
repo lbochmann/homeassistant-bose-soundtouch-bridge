@@ -24,6 +24,16 @@ COPY bridge.py /bridge.py
 #   SPEAKERS_JSON='[{"name":"Wohnzimmer","preset_1_url":"..."}]'   # only Wohnzimmer
 #   SPEAKERS_JSON='[{"name":"Bad","preset_1_url":"..."},
 #                   {"preset_1_url":"..."}]'                       # Bad-specific + wildcard fallback
+# Shortcut for the common "same presets on every speaker" case — set these
+# instead of (or alongside) SPEAKERS_JSON. They're appended as a wildcard
+# entry unless SPEAKERS_JSON already contains one.
+ENV PRESET_1_URL=""
+ENV PRESET_2_URL=""
+ENV PRESET_3_URL=""
+ENV PRESET_4_URL=""
+ENV PRESET_5_URL=""
+ENV PRESET_6_URL=""
+
 ENV SPEAKERS_JSON=""
 ENV SYNC_PRESETS_ON_STARTUP="true"
 

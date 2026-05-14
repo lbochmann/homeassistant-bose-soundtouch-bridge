@@ -35,30 +35,31 @@ the firmware.
 
 ## Configuration
 
-Fill in the `speakers:` list. Two patterns:
+**Easy mode — same presets on every speaker.** Fill in the six top-level
+`preset_N_url` fields and leave `speakers:` empty. The bridge
+auto-discovers every SoundTouch on the LAN via SSDP and applies these
+presets to all of them:
 
-- **Same presets on every speaker** — one wildcard entry (no `host`, no
-  `name`). The bridge auto-discovers every SoundTouch on the LAN and
-  applies these presets to all of them:
-  ```yaml
-  speakers:
-    - preset_1_url: "http://icecast.vrtcdn.be/radio1-high.mp3"
-      preset_2_url: "http://icecast.vrtcdn.be/stubru-high.mp3"
-  ```
+```yaml
+preset_1_url: "http://icecast.vrtcdn.be/radio1-high.mp3"
+preset_2_url: "http://icecast.vrtcdn.be/stubru-high.mp3"
+speakers: []
+```
 
-- **Different presets per speaker** — one entry per speaker, matched by
-  `name:` (the friendly name configured on the speaker itself, e.g.
-  "Wohnzimmer"; resolved via SSDP at startup so it survives DHCP changes)
-  or by `host:` (a fixed IP). A trailing wildcard entry catches all
-  remaining speakers:
-  ```yaml
-  speakers:
-    - name: "Wohnzimmer"
-      preset_1_url: "http://icecast.vrtcdn.be/radio1-high.mp3"
-    - name: "Bad"
-      preset_1_url: "http://icecast.vrtcdn.be/ra2ovl-high.mp3"
-    - preset_1_url: "http://icecast.vrtcdn.be/radio1-high.mp3"  # default for any other speaker
-  ```
+**Per-speaker overrides.** When you want a specific speaker to play
+something different, add an entry to `speakers:` matched by `name:` (the
+friendly name set on the speaker itself, e.g. "Wohnzimmer" — resolved
+via SSDP at startup so it survives DHCP changes) or by `host:` (a fixed
+IP). Speakers without an explicit entry continue to use the top-level
+preset map:
+
+```yaml
+preset_1_url: "http://icecast.vrtcdn.be/radio1-high.mp3"   # default for every speaker
+preset_2_url: "http://icecast.vrtcdn.be/stubru-high.mp3"
+speakers:
+  - name: "Bad"                                            # override: Bad plays Radio 2 OVL
+    preset_1_url: "http://icecast.vrtcdn.be/ra2ovl-high.mp3"
+```
 
 Leave `sync_presets_on_startup` enabled (default). On startup the
 add-on writes each configured URL into the speaker's matching preset

@@ -57,20 +57,46 @@ def _entry_has_content(e: dict) -> bool:
     )
 
 
+def _wildcard_from_flat(d: dict) -> dict | None:
+    """Build a wildcard speaker entry from top-level `preset_N_url` fields.
+    Returns None if no preset URLs are set."""
+    presets = {
+        f"preset_{n}_url": (d.get(f"preset_{n}_url") or "").strip()
+        for n in range(1, 7)
+    }
+    return presets if any(presets.values()) else None
+
+
+def _has_wildcard(speakers: list[dict]) -> bool:
+    return any(
+        not (s.get("host") or "").strip() and not (s.get("name") or "").strip()
+        for s in speakers
+    )
+
+
 def load_options() -> dict:
     """Return {'speakers': [...], 'sync_presets_on_startup': bool}.
 
     Supervisor (HAOS / Supervised): options come as JSON at /data/options.json.
     Standalone Docker: `SPEAKERS_JSON` env var holds the JSON-encoded list.
 
-    Each speaker entry has optional `host` / `name` plus `preset_1_url` ..
-    `preset_6_url`. An entry with neither `host` nor `name` is a wildcard that
-    fans out to every discovered speaker no explicit entry claimed.
+    Top-level `preset_1_url` .. `preset_6_url` (Supervisor) or `PRESET_N_URL`
+    env vars (standalone) are a convenience for the common case "same presets
+    on every speaker": if set and no explicit wildcard already exists in
+    `speakers:` / `SPEAKERS_JSON`, they are appended as a wildcard entry.
+
+    Each speaker entry in the list has optional `host` / `name` plus
+    `preset_1_url` .. `preset_6_url`. An entry with neither `host` nor `name`
+    is a wildcard that fans out to every discovered speaker no explicit entry
+    claimed.
     """
     if os.path.exists(OPTIONS_PATH):
         with open(OPTIONS_PATH) as f:
             raw = json.load(f)
         speakers = [s for s in (raw.get("speakers") or []) if _entry_has_content(s)]
+        flat = _wildcard_from_flat(raw)
+        if flat and not _has_wildcard(speakers):
+            speakers.append(flat)
         return {
             "speakers": speakers,
             "sync_presets_on_startup": raw.get("sync_presets_on_startup", True),
@@ -88,6 +114,13 @@ def load_options() -> dict:
                 print("[cfg] SPEAKERS_JSON is not a JSON list — ignoring")
         except json.JSONDecodeError as e:
             print(f"[cfg] SPEAKERS_JSON invalid: {e}")
+
+    flat = _wildcard_from_flat({
+        f"preset_{n}_url": os.environ.get(f"PRESET_{n}_URL", "")
+        for n in range(1, 7)
+    })
+    if flat and not _has_wildcard(speakers):
+        speakers.append(flat)
 
     sync = os.environ.get("SYNC_PRESETS_ON_STARTUP", "true").lower() in ("1", "true", "yes", "on")
     return {"speakers": speakers, "sync_presets_on_startup": sync}

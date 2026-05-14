@@ -16,26 +16,24 @@ services:
     network_mode: host
     restart: unless-stopped
     environment:
-      # JSON array of speakers. Each entry is one of:
-      #   - {"preset_N_url": "..."}                                wildcard — applies to every
-      #                                                            SoundTouch on the LAN that no
-      #                                                            other entry claims
-      #   - {"name": "Wohnzimmer", "preset_N_url": "..."}          matched by the friendly name
-      #                                                            set on the speaker (SSDP,
-      #                                                            survives DHCP changes)
-      #   - {"host": "192.168.1.42", "preset_N_url": "..."}        pinned to a fixed IP
-      SPEAKERS_JSON: |
-        [
-          {
-            "name": "Wohnzimmer",
-            "preset_1_url": "http://icecast.vrtcdn.be/radio1-high.mp3",
-            "preset_2_url": "http://icecast.vrtcdn.be/stubru-high.mp3"
-          },
-          {
-            "name": "Bad",
-            "preset_1_url": "http://icecast.vrtcdn.be/ra2ovl-high.mp3"
-          }
-        ]
+      # --- Easy mode: same presets on every SoundTouch on the LAN ----------
+      # Just set the URLs you want each preset button to play. The bridge
+      # discovers all speakers via SSDP and applies these to every one.
+      PRESET_1_URL: "http://icecast.vrtcdn.be/radio1-high.mp3"
+      PRESET_2_URL: "http://icecast.vrtcdn.be/stubru-high.mp3"
+      PRESET_3_URL: ""
+      PRESET_4_URL: ""
+      PRESET_5_URL: ""
+      PRESET_6_URL: ""
+
+      # --- Per-speaker overrides (optional) --------------------------------
+      # Each entry matches one speaker by `name` (friendly name set on the
+      # speaker, resolved via SSDP — survives DHCP) or by `host` (fixed IP).
+      # Leave SPEAKERS_JSON unset to skip overrides entirely.
+      # SPEAKERS_JSON: |
+      #   [
+      #     {"name": "Bad", "preset_1_url": "http://icecast.vrtcdn.be/ra2ovl-high.mp3"}
+      #   ]
 
       # Seed each speaker's preset slots on startup so physical button presses
       # always fire the WebSocket event. Skips slots already in the right state.

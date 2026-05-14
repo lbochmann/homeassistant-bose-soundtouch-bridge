@@ -1,6 +1,6 @@
 name: "Bose SoundTouch Bridge"
-description: "Revives preset buttons on Bose SoundTouch speakers after the Bose cloud retirement (2026). Manages every SoundTouch on the LAN from one instance — each speaker can have its own preset map, or share a default."
-version: "1.6.0"
+description: "Revives preset buttons on Bose SoundTouch speakers after the Bose cloud retirement (2026). Manages every SoundTouch on the LAN from one instance — same presets on every speaker by default; add `speakers:` entries to override individual speakers."
+version: "1.6.1"
 slug: "bose_bridge"
 url: "https://github.com/lbochmann/homeassistant-bose-soundtouch-bridge"
 init: false
@@ -13,10 +13,21 @@ host_network: true
 services:
   - mqtt:need
 options:
-  sync_presets_on_startup: true
+  preset_1_url: ""
+  preset_2_url: ""
+  preset_3_url: ""
+  preset_4_url: ""
+  preset_5_url: ""
+  preset_6_url: ""
   speakers: []
+  sync_presets_on_startup: true
 schema:
-  sync_presets_on_startup: bool
+  preset_1_url: str?
+  preset_2_url: str?
+  preset_3_url: str?
+  preset_4_url: str?
+  preset_5_url: str?
+  preset_6_url: str?
   speakers:
     - name: str?
       host: str?
@@ -26,3 +37,4 @@ schema:
       preset_4_url: str?
       preset_5_url: str?
       preset_6_url: str?
+  sync_presets_on_startup: bool
