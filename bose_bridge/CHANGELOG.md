@@ -1,33 +1,30 @@
 # Changelog
 
-## 1.6.0
+## 1.6.0 — fork of [sandervg/homeassistant-bose-soundtouch-bridge](https://github.com/sandervg/homeassistant-bose-soundtouch-bridge) 1.5.0
 
-- **Multi-speaker support.** A single bridge instance can now manage any
-  number of SoundTouch speakers on the LAN — each with its own preset map.
-  Define a `speakers:` list in the add-on Configuration tab (or
-  `SPEAKERS_JSON` for the standalone image); each entry has an optional
-  `host` and/or `name` plus `preset_1_url` … `preset_6_url`.
+- **Multi-speaker support.** A single bridge instance now manages every
+  SoundTouch on the LAN. Define a `speakers:` list in the add-on
+  Configuration tab (or `SPEAKERS_JSON` for the standalone image); each
+  entry has an optional `host` and/or `name` plus `preset_1_url` …
+  `preset_6_url`.
 - **Match speakers by friendly name.** Instead of pinning each speaker to a
-  static IP, you can match by the name configured on the speaker (e.g.
-  `name: "Wohnzimmer"`). SSDP auto-discovery resolves the IP at startup, so
-  speakers stay reachable even if their DHCP lease changes. `host:` is still
-  honoured when you want a hard pin.
-- One thread per speaker handles the WebSocket loop; a single shared MQTT
-  client dispatches HA commands to the right device by `device_id`. MQTT
-  discovery already keyed entities by device ID, so per-speaker buttons
-  appear in HA automatically — six per speaker.
+  static IP, match by the name configured on the speaker itself (e.g.
+  `name: "Wohnzimmer"`). SSDP auto-discovery resolves the IP at startup,
+  so speakers stay reachable even if their DHCP lease changes. `host:` is
+  still honoured when you want a hard pin.
 - **Master preset (wildcard) entry.** A speaker entry without `host` or
-  `name` is treated as a default that fans out to every discovered speaker
-  no explicit entry claimed. So the minimal config — one entry with just
-  `preset_1_url` etc. — applies the same presets to every SoundTouch on the
-  LAN; add specific `name:` entries to override individual speakers with a
-  different preset map.
-- **Backwards-compatible config.** Existing 1.5.x installs keep working: if
-  `speakers:` is empty, the top-level `bose_host` + `preset_N_url` fields
-  are treated as a single anonymous speaker (which now fans out via the
-  wildcard rule when no host is set — previously SSDP just picked the first
-  speaker that replied). Equivalent fallback for standalone env vars
-  (`BOSE_HOST` + `PRESET_N_URL`).
+  `name` is a default that fans out to every discovered speaker no
+  explicit entry claimed. So the minimal config — one entry with just
+  `preset_1_url` etc. — applies the same presets to every SoundTouch on
+  the LAN; add specific `name:` entries to override individual speakers
+  with a different preset map.
+- One thread per speaker handles the WebSocket loop; a single shared MQTT
+  client dispatches HA commands to the right device by `device_id`.
+  Per-speaker `button.bose_<id>_preset_N` entities appear in HA
+  automatically — six per speaker.
+- **Breaking:** the legacy single-speaker config shape (top-level
+  `bose_host` + `preset_N_url`, and the `BOSE_HOST` / `PRESET_N_URL` env
+  vars) is removed. Migrate to a `speakers:` list / `SPEAKERS_JSON`.
 
 ## 1.5.0
 

@@ -49,47 +49,28 @@ SSDP_TARGET = "urn:schemas-upnp-org:device:MediaRenderer:1"
 # ---------- config ---------------------------------------------------------
 
 
-def _speaker_from_flat(d: dict) -> dict:
-    """Build a speaker entry from a flat legacy dict (bose_host + preset_N_url)."""
-    e = {
-        "name": (d.get("name") or "").strip(),
-        "host": (d.get("bose_host") or d.get("host") or "").strip(),
-    }
-    for n in range(1, 7):
-        e[f"preset_{n}_url"] = (d.get(f"preset_{n}_url") or "").strip()
-    return e
-
-
-def _flat_has_content(d: dict) -> bool:
-    return bool(d.get("host") or d.get("name") or any(d.get(f"preset_{n}_url") for n in range(1, 7)))
+def _entry_has_content(e: dict) -> bool:
+    return bool(
+        (e.get("host") or "").strip()
+        or (e.get("name") or "").strip()
+        or any((e.get(f"preset_{n}_url") or "").strip() for n in range(1, 7))
+    )
 
 
 def load_options() -> dict:
     """Return {'speakers': [...], 'sync_presets_on_startup': bool}.
 
     Supervisor (HAOS / Supervised): options come as JSON at /data/options.json.
-    Standalone Docker: options come from env vars.
+    Standalone Docker: `SPEAKERS_JSON` env var holds the JSON-encoded list.
 
-    Two config shapes are supported (the new list form takes precedence; the
-    flat form is kept for backwards compatibility with pre-1.6 single-speaker
-    installations):
-
-    - New: a `speakers:` list, one entry per speaker. Each entry has optional
-      `host` / `name` plus `preset_1_url` .. `preset_6_url`.
-    - Legacy: top-level `bose_host` + `preset_N_url` — treated as a single
-      anonymous speaker.
-
-    Standalone env-var equivalent of the list form: `SPEAKERS_JSON` containing
-    the JSON-encoded list.
+    Each speaker entry has optional `host` / `name` plus `preset_1_url` ..
+    `preset_6_url`. An entry with neither `host` nor `name` is a wildcard that
+    fans out to every discovered speaker no explicit entry claimed.
     """
     if os.path.exists(OPTIONS_PATH):
         with open(OPTIONS_PATH) as f:
             raw = json.load(f)
-        speakers = [s for s in (raw.get("speakers") or []) if _flat_has_content(s)]
-        if not speakers:
-            flat = _speaker_from_flat(raw)
-            if _flat_has_content(flat):
-                speakers = [flat]
+        speakers = [s for s in (raw.get("speakers") or []) if _entry_has_content(s)]
         return {
             "speakers": speakers,
             "sync_presets_on_startup": raw.get("sync_presets_on_startup", True),
@@ -102,22 +83,11 @@ def load_options() -> dict:
         try:
             parsed = json.loads(speakers_json)
             if isinstance(parsed, list):
-                speakers = [_speaker_from_flat(s) for s in parsed if _flat_has_content(s)]
+                speakers = [s for s in parsed if isinstance(s, dict) and _entry_has_content(s)]
             else:
                 print("[cfg] SPEAKERS_JSON is not a JSON list — ignoring")
         except json.JSONDecodeError as e:
             print(f"[cfg] SPEAKERS_JSON invalid: {e}")
-
-    if not speakers:
-        flat = {
-            "bose_host": os.environ.get("BOSE_HOST", "").strip(),
-            "name": os.environ.get("BOSE_NAME", "").strip(),
-        }
-        for n in range(1, 7):
-            flat[f"preset_{n}_url"] = os.environ.get(f"PRESET_{n}_URL", "").strip()
-        flat = _speaker_from_flat(flat)
-        if _flat_has_content(flat):
-            speakers = [flat]
 
     sync = os.environ.get("SYNC_PRESETS_ON_STARTUP", "true").lower() in ("1", "true", "yes", "on")
     return {"speakers": speakers, "sync_presets_on_startup": sync}
@@ -618,7 +588,7 @@ def main():
     if not cfg_speakers:
         raise SystemExit(
             "no speakers configured. Add at least one entry under `speakers:` "
-            "(Supervisor) or set PRESET_*_URL / SPEAKERS_JSON (standalone)."
+            "(Supervisor) or set `SPEAKERS_JSON` (standalone)."
         )
 
     resolved = resolve_speakers(cfg_speakers)

@@ -14,23 +14,19 @@ RUN apk add --no-cache libxml2 libxslt \
 
 COPY bridge.py /bridge.py
 
-# Multi-speaker config (preferred): JSON array of speaker entries, each with
-# optional `host` / `name` (one of the two is required for matching) plus
-# `preset_1_url` .. `preset_6_url`. Example:
-#   SPEAKERS_JSON='[{"name":"Wohnzimmer","preset_1_url":"http://..."},
-#                   {"name":"Bad","preset_1_url":"http://..."}]'
+# Speaker config: JSON array of speaker entries. Each entry has optional `host`
+# and `name` plus `preset_1_url` .. `preset_6_url`. An entry with neither host
+# nor name is a wildcard — its preset map is applied to every discovered
+# speaker no explicit entry claimed.
+#
+# Examples:
+#   SPEAKERS_JSON='[{"preset_1_url":"http://..."}]'                # one preset map for all speakers
+#   SPEAKERS_JSON='[{"name":"Wohnzimmer","preset_1_url":"..."}]'   # only Wohnzimmer
+#   SPEAKERS_JSON='[{"name":"Bad","preset_1_url":"..."},
+#                   {"preset_1_url":"..."}]'                       # Bad-specific + wildcard fallback
 ENV SPEAKERS_JSON=""
-
-# Legacy single-speaker fields — used only when SPEAKERS_JSON is empty.
-ENV BOSE_HOST=""
-ENV BOSE_NAME=""
 ENV SYNC_PRESETS_ON_STARTUP="true"
-ENV PRESET_1_URL=""
-ENV PRESET_2_URL=""
-ENV PRESET_3_URL=""
-ENV PRESET_4_URL=""
-ENV PRESET_5_URL=""
-ENV PRESET_6_URL=""
+
 # MQTT (optional — leave MQTT_HOST blank to disable HA control buttons)
 ENV MQTT_HOST=""
 ENV MQTT_PORT="1883"

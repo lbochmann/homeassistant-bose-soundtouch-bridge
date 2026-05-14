@@ -11,16 +11,19 @@
 
 services:
   bose_bridge:
-    image: ghcr.io/sandervg/bose-soundtouch-bridge:latest
+    image: ghcr.io/lbochmann/bose-soundtouch-bridge:latest
     container_name: bose-soundtouch-bridge
     network_mode: host
     restart: unless-stopped
     environment:
-      # ---- Multi-speaker config (preferred) ---------------------------------
-      # JSON array of speakers. Each entry must set either `host` (a fixed IP)
-      # or `name` (the friendly name set on the speaker, e.g. "Wohnzimmer" —
-      # matched against /info via SSDP auto-discovery). Unused preset slots
-      # can be left blank or omitted.
+      # JSON array of speakers. Each entry is one of:
+      #   - {"preset_N_url": "..."}                                wildcard — applies to every
+      #                                                            SoundTouch on the LAN that no
+      #                                                            other entry claims
+      #   - {"name": "Wohnzimmer", "preset_N_url": "..."}          matched by the friendly name
+      #                                                            set on the speaker (SSDP,
+      #                                                            survives DHCP changes)
+      #   - {"host": "192.168.1.42", "preset_N_url": "..."}        pinned to a fixed IP
       SPEAKERS_JSON: |
         [
           {
@@ -33,12 +36,6 @@ services:
             "preset_1_url": "http://icecast.vrtcdn.be/ra2ovl-high.mp3"
           }
         ]
-
-      # ---- Legacy single-speaker config (only used if SPEAKERS_JSON is blank)
-      BOSE_HOST: ""           # leave blank to auto-discover the lone speaker
-      # PRESET_1_URL: "http://icecast.vrtcdn.be/radio1-high.mp3"
-      # PRESET_2_URL: "http://icecast.vrtcdn.be/ra2ovl-high.mp3"
-      # ...
 
       # Seed each speaker's preset slots on startup so physical button presses
       # always fire the WebSocket event. Skips slots already in the right state.
