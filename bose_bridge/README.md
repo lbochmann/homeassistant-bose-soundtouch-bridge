@@ -36,23 +36,40 @@ the firmware.
 
 1. Install this add-on (see *Install* below).
 2. Open the add-on → **Configuration**.
-3. Either leave `bose_host` blank to auto-discover the speaker via SSDP,
-   or set it to the speaker's IP address (e.g. `192.168.1.42`).
-4. Fill in `preset_1_url` … `preset_6_url` with the stream URLs you want
-   each preset button to play. Leave any unused slots blank.
-5. Leave `sync_presets_on_startup` enabled (default). On startup, the
-   add-on writes each configured URL into the speaker's matching preset
+3. Fill in the `speakers:` list. Two patterns:
+   - **Same presets on every speaker** — one wildcard entry with no
+     `host` and no `name`. The bridge auto-discovers all SoundTouch
+     speakers on the LAN and applies these presets to every one of them:
+     ```yaml
+     speakers:
+       - preset_1_url: "http://icecast.vrtcdn.be/radio1-high.mp3"
+         preset_2_url: "http://icecast.vrtcdn.be/stubru-high.mp3"
+     ```
+   - **Different presets per speaker** — one entry per speaker, matched
+     by `name:` (the friendly name configured on the speaker itself,
+     e.g. "Wohnzimmer"; resolved via SSDP at startup so it survives DHCP
+     changes) or by `host:` (a fixed IP). A trailing wildcard entry can
+     catch all remaining speakers:
+     ```yaml
+     speakers:
+       - name: "Wohnzimmer"
+         preset_1_url: "http://icecast.vrtcdn.be/radio1-high.mp3"
+       - name: "Bad"
+         preset_1_url: "http://icecast.vrtcdn.be/ra2ovl-high.mp3"
+       - preset_1_url: "http://icecast.vrtcdn.be/radio1-high.mp3"  # default for any other speaker
+     ```
+4. Leave `sync_presets_on_startup` enabled (default). On startup, the
+   add-on writes each configured URL into each speaker's matching preset
    slot — required so physical button presses emit the WebSocket event
    the bridge listens for. Skip-when-equal makes restarts cheap.
-6. **Save** → **Start** → check the **Log** tab; it should print
-   ```
-   [cfg] preset map: ...
-   [upnp] description: http://...
-   [sync] all configured presets already match the device — skipping
-   [ws] connected to ws://...:8080
-   ```
+5. **Save** → **Start** → check the **Log** tab; you should see one
+   `[upnp] / [sync] / [ws]` block per speaker.
 
-Press a preset button on the speaker and the radio should kick in.
+Press a preset button on any of the speakers and the radio should kick in.
+
+> Single-speaker installs from 1.5.x keep working without changes — the
+> legacy top-level `bose_host` + `preset_N_url` fields are still honoured
+> when `speakers:` is empty.
 
 For HA control: with the Mosquitto Broker add-on running and the MQTT
 integration configured in HA Core, six `button.bose_<id>_preset_N`
@@ -98,9 +115,8 @@ extra proxy and are out of scope for this add-on.
 - Only **plain HTTP audio streams** (no token-protected commercial
   streams without an extra proxy)
 - The speaker's display still shows whatever the original preset is set
-  to — buttons trigger the bridge regardless. If you want the right name
-  to show up, store any UPnP placeholder as the preset on the speaker.
-- One bridge per speaker. Multi-speaker support is on the roadmap.
+  to — buttons trigger the bridge regardless. The sync step writes the
+  configured URL onto the slot, so the display name matches in most cases.
 
 ## License
 

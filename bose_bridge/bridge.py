@@ -2,16 +2,20 @@
 """
 Bose SoundTouch preset-to-radio bridge.
 
-- Listens to the speaker's WebSocket. When a preset button is pressed,
-  pushes the configured stream URL via UPnP SetAVTransportURI + Play
-  with DIDL-Lite metadata so the station name and logo show up on the
-  speaker.
-- Looks up station name + favicon from radio-browser.info at startup
-  (cached) for each configured URL.
-- Connects to the Supervisor-provided MQTT broker and publishes Home
-  Assistant MQTT-discovery configs so each preset appears as a
-  `button.bose_preset_N` entity. Triggering the entity (UI / automation
-  / script) plays the same preset over UPnP.
+Manages one or more SoundTouch speakers on the LAN. For each speaker:
+- listens to the local WebSocket; when a preset button is pressed, pushes the
+  configured stream URL via UPnP SetAVTransportURI + Play with DIDL-Lite
+  metadata so the station name and logo show up on the speaker
+- looks up station name + favicon from radio-browser.info (cached for the
+  session)
+- publishes Home Assistant MQTT-discovery configs so each preset appears as a
+  `button.bose_<id>_preset_N` entity. Pressing the entity plays the same URL.
+
+A single config can manage multiple speakers (each with its own preset map),
+matched to discovered devices either by IP (`host`) or by the friendly name
+the user set on the speaker (`name`, e.g. "Wohnzimmer"). One thread per
+speaker handles the WebSocket loop; one shared MQTT client dispatches HA
+commands to the right speaker by `device_id`.
 """
 
 import html
@@ -28,8 +32,6 @@ import paho.mqtt.client as mqtt
 import upnpclient
 import websocket
 
-import xml.etree.ElementTree as _ET
-
 OPTIONS_PATH = "/data/options.json"
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
 SUPERVISOR_URL = "http://supervisor"
@@ -39,6 +41,7 @@ RADIO_BROWSER_BASES = [
     "https://at1.api.radio-browser.info",
 ]
 PRESET_RE = re.compile(r'<nowSelectionUpdated>\s*<preset id="(\d+)"')
+MQTT_TOPIC_RE = re.compile(r"^bose_bridge/([^/]+)/preset/(\d+)/command$")
 SSDP_ADDR = ("239.255.255.250", 1900)
 SSDP_TARGET = "urn:schemas-upnp-org:device:MediaRenderer:1"
 
@@ -46,28 +49,88 @@ SSDP_TARGET = "urn:schemas-upnp-org:device:MediaRenderer:1"
 # ---------- config ---------------------------------------------------------
 
 
-def load_options() -> dict:
-    """Read config. In Supervisor (HAOS / Supervised) the add-on options arrive
-    as JSON at /data/options.json. In standalone Docker (HA Container, plain
-    Docker, NAS, etc.) they come from environment variables."""
-    if os.path.exists(OPTIONS_PATH):
-        with open(OPTIONS_PATH) as f:
-            return json.load(f)
-    print("[cfg] /data/options.json not found — reading config from environment")
-    cfg: dict = {
-        "bose_host": os.environ.get("BOSE_HOST", "").strip(),
-        "sync_presets_on_startup":
-            os.environ.get("SYNC_PRESETS_ON_STARTUP", "true").lower() in ("1", "true", "yes", "on"),
+def _speaker_from_flat(d: dict) -> dict:
+    """Build a speaker entry from a flat legacy dict (bose_host + preset_N_url)."""
+    e = {
+        "name": (d.get("name") or "").strip(),
+        "host": (d.get("bose_host") or d.get("host") or "").strip(),
     }
     for n in range(1, 7):
-        cfg[f"preset_{n}_url"] = os.environ.get(f"PRESET_{n}_URL", "").strip()
-    return cfg
+        e[f"preset_{n}_url"] = (d.get(f"preset_{n}_url") or "").strip()
+    return e
+
+
+def _flat_has_content(d: dict) -> bool:
+    return bool(d.get("host") or d.get("name") or any(d.get(f"preset_{n}_url") for n in range(1, 7)))
+
+
+def load_options() -> dict:
+    """Return {'speakers': [...], 'sync_presets_on_startup': bool}.
+
+    Supervisor (HAOS / Supervised): options come as JSON at /data/options.json.
+    Standalone Docker: options come from env vars.
+
+    Two config shapes are supported (the new list form takes precedence; the
+    flat form is kept for backwards compatibility with pre-1.6 single-speaker
+    installations):
+
+    - New: a `speakers:` list, one entry per speaker. Each entry has optional
+      `host` / `name` plus `preset_1_url` .. `preset_6_url`.
+    - Legacy: top-level `bose_host` + `preset_N_url` — treated as a single
+      anonymous speaker.
+
+    Standalone env-var equivalent of the list form: `SPEAKERS_JSON` containing
+    the JSON-encoded list.
+    """
+    if os.path.exists(OPTIONS_PATH):
+        with open(OPTIONS_PATH) as f:
+            raw = json.load(f)
+        speakers = [s for s in (raw.get("speakers") or []) if _flat_has_content(s)]
+        if not speakers:
+            flat = _speaker_from_flat(raw)
+            if _flat_has_content(flat):
+                speakers = [flat]
+        return {
+            "speakers": speakers,
+            "sync_presets_on_startup": raw.get("sync_presets_on_startup", True),
+        }
+
+    print("[cfg] /data/options.json not found — reading config from environment")
+    speakers: list[dict] = []
+    speakers_json = os.environ.get("SPEAKERS_JSON", "").strip()
+    if speakers_json:
+        try:
+            parsed = json.loads(speakers_json)
+            if isinstance(parsed, list):
+                speakers = [_speaker_from_flat(s) for s in parsed if _flat_has_content(s)]
+            else:
+                print("[cfg] SPEAKERS_JSON is not a JSON list — ignoring")
+        except json.JSONDecodeError as e:
+            print(f"[cfg] SPEAKERS_JSON invalid: {e}")
+
+    if not speakers:
+        flat = {
+            "bose_host": os.environ.get("BOSE_HOST", "").strip(),
+            "name": os.environ.get("BOSE_NAME", "").strip(),
+        }
+        for n in range(1, 7):
+            flat[f"preset_{n}_url"] = os.environ.get(f"PRESET_{n}_URL", "").strip()
+        flat = _speaker_from_flat(flat)
+        if _flat_has_content(flat):
+            speakers = [flat]
+
+    sync = os.environ.get("SYNC_PRESETS_ON_STARTUP", "true").lower() in ("1", "true", "yes", "on")
+    return {"speakers": speakers, "sync_presets_on_startup": sync}
 
 
 # ---------- Bose discovery -------------------------------------------------
 
 
-def discover_soundtouch() -> str | None:
+def discover_soundtouch_all(timeout: float = 3.0) -> list[str]:
+    """Return LAN IPs of every SoundTouch / Bose UPnP MediaRenderer that
+    responds to SSDP within `timeout`. Deduplicated by IP. Sends one M-SEARCH
+    and drains responses until the deadline (multiple speakers all reply to
+    the same packet)."""
     msg = (
         "M-SEARCH * HTTP/1.1\r\n"
         f"HOST: {SSDP_ADDR[0]}:{SSDP_ADDR[1]}\r\n"
@@ -76,11 +139,21 @@ def discover_soundtouch() -> str | None:
         f"ST: {SSDP_TARGET}\r\n\r\n"
     ).encode()
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.settimeout(3)
     s.sendto(msg, SSDP_ADDR)
+    found: dict[str, None] = {}
+    deadline = time.monotonic() + timeout
     try:
         while True:
-            data, addr = s.recvfrom(2048)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            s.settimeout(remaining)
+            try:
+                data, addr = s.recvfrom(2048)
+            except socket.timeout:
+                break
+            if addr[0] in found:
+                continue
             text = data.decode(errors="ignore")
             loc = next(
                 (l.split(": ", 1)[1].strip() for l in text.split("\r\n") if l.lower().startswith("location:")),
@@ -93,15 +166,14 @@ def discover_soundtouch() -> str | None:
             except Exception:
                 continue
             if "SoundTouch" in desc or "Bose" in desc:
-                return addr[0]
-    except socket.timeout:
-        return None
+                found[addr[0]] = None
     finally:
         s.close()
+    return list(found.keys())
 
 
 def fetch_speaker_info(host: str) -> tuple[str, str, str]:
-    """Return (device_id, friendly_name, model) by hitting /info."""
+    """Return (device_id, friendly_name, model) by hitting /info on port 8090."""
     with urllib.request.urlopen(f"http://{host}:8090/info", timeout=5) as r:
         info = r.read().decode()
     device_id = re.search(r'deviceID="([0-9A-F]+)"', info).group(1)
@@ -111,13 +183,117 @@ def fetch_speaker_info(host: str) -> tuple[str, str, str]:
 
 
 def get_upnp_services(host: str, device_id: str):
-    """Return (av_transport, rendering_control) for the given speaker."""
     desc_url = f"http://{host}:8091/XD/BO5EBO5E-F00D-F00D-FEED-{device_id}.xml"
     print(f"[upnp] description: {desc_url}")
     d = upnpclient.Device(desc_url)
     av = next(s for s in d.services if "AVTransport" in s.service_id)
     rc = next(s for s in d.services if "RenderingControl" in s.service_id)
     return av, rc
+
+
+# ---------- speaker resolution --------------------------------------------
+
+
+def _entry_presets(entry: dict) -> dict[int, str]:
+    return {n: url for n in range(1, 7)
+            if (url := (entry.get(f"preset_{n}_url") or "").strip())}
+
+
+def resolve_speakers(cfg_speakers: list[dict]) -> list[dict]:
+    """Match each config entry to a real speaker on the LAN.
+
+    An entry with `host` is pinned to that IP. An entry with `name` (but no
+    host) is matched against /info `<name>` via SSDP discovery
+    (case-insensitive). An entry with NEITHER `host` nor `name` is a
+    **wildcard / master preset**: its preset map is fanned out to every
+    discovered speaker that no explicit entry has claimed. This lets the
+    simplest config — one entry with just `preset_*_url` — apply the same
+    presets to every SoundTouch on the LAN, while explicit entries can still
+    override individual speakers.
+
+    Only one wildcard entry is honoured; additional ones are ignored.
+
+    Returns dicts {host, device_id, friendly, model, presets:{n: url}}.
+    """
+    explicit: list[dict] = []
+    wildcards: list[dict] = []
+    for entry in cfg_speakers:
+        if (entry.get("host") or "").strip() or (entry.get("name") or "").strip():
+            explicit.append(entry)
+        else:
+            wildcards.append(entry)
+    if len(wildcards) > 1:
+        print(f"[cfg] {len(wildcards)} wildcard speaker entries — only the first is used, the rest are ignored")
+    wildcard = wildcards[0] if wildcards else None
+
+    needs_discovery = wildcard is not None or any(
+        not (e.get("host") or "").strip() for e in explicit
+    )
+    discovered: list[tuple[str, str, str, str]] = []
+    if needs_discovery:
+        print("[cfg] discovering SoundTouch speakers via SSDP...")
+        for ip in discover_soundtouch_all():
+            try:
+                device_id, friendly, model = fetch_speaker_info(ip)
+                discovered.append((ip, device_id, friendly, model))
+                print(f"[cfg] discovered: {friendly!r} ({model}) at {ip} — id {device_id}")
+            except Exception as e:
+                print(f"[cfg] could not read /info from {ip}: {e}")
+        if not discovered:
+            print("[cfg] SSDP discovery returned no speakers")
+
+    resolved: list[dict] = []
+    used_ids: set[str] = set()
+
+    for entry in explicit:
+        host = (entry.get("host") or "").strip()
+        name = (entry.get("name") or "").strip()
+        presets = _entry_presets(entry)
+        if host:
+            try:
+                device_id, friendly, model = fetch_speaker_info(host)
+            except Exception as e:
+                print(f"[cfg] cannot reach configured host={host}: {e}")
+                continue
+        else:
+            match = next(
+                (d for d in discovered if d[2].lower() == name.lower() and d[1] not in used_ids),
+                None,
+            )
+            if not match:
+                avail_names = [d[2] for d in discovered if d[1] not in used_ids]
+                print(f"[cfg] no discovered speaker matches name={name!r}; unclaimed: {avail_names}")
+                continue
+            host, device_id, friendly, model = match
+        used_ids.add(device_id)
+        resolved.append({
+            "host": host,
+            "device_id": device_id,
+            "friendly": friendly,
+            "model": model,
+            "presets": presets,
+        })
+
+    if wildcard is not None:
+        presets = _entry_presets(wildcard)
+        remaining = [d for d in discovered if d[1] not in used_ids]
+        if not presets:
+            print("[cfg] wildcard entry has no preset URLs — skipping")
+        elif not remaining:
+            print("[cfg] wildcard entry has no unclaimed speakers to apply to")
+        else:
+            print(f"[cfg] applying wildcard preset map to {len(remaining)} speaker(s): {[d[2] for d in remaining]}")
+            for host, device_id, friendly, model in remaining:
+                used_ids.add(device_id)
+                resolved.append({
+                    "host": host,
+                    "device_id": device_id,
+                    "friendly": friendly,
+                    "model": model,
+                    "presets": dict(presets),
+                })
+
+    return resolved
 
 
 # ---------- radio-browser.info ---------------------------------------------
@@ -133,7 +309,7 @@ def lookup_station(url: str) -> dict:
                 data=body,
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
-                    "User-Agent": "homeassistant-bose-soundtouch-bridge/1.3.0",
+                    "User-Agent": "homeassistant-bose-soundtouch-bridge/1.6.0",
                 },
             )
             with urllib.request.urlopen(req, timeout=4) as r:
@@ -169,7 +345,6 @@ def build_didl(url: str, meta: dict) -> str:
 
 
 def _key(host: str, state: str, key: str):
-    """POST a key event to the SoundTouch /key endpoint."""
     body = f'<key state="{state}" sender="Gabbo">{key}</key>'.encode()
     req = urllib.request.Request(
         f"http://{host}:8090/key",
@@ -195,16 +370,16 @@ def _current_preset_url(host: str, n: int) -> str | None:
     return loc.group(1) if loc else None
 
 
-def sync_presets(host: str, av, rc, presets: dict):
+def sync_presets(host: str, av, rc, presets: dict, tag: str = ""):
     """Save each configured preset onto the speaker so physical button presses
-    fire the WebSocket event the bridge listens for. Skips slots already in
+    emit a WebSocket event the bridge can intercept. Skips slots already in
     the right state. Mutes during the operation to hide audio blips."""
     targets = {n: e["url"] for n, e in presets.items() if e.get("url")}
     needed = {n: u for n, u in targets.items() if _current_preset_url(host, n) != u}
     if not needed:
-        print("[sync] all configured presets already match the device — skipping")
+        print(f"[sync{tag}] all configured presets already match the device — skipping")
         return
-    print(f"[sync] {len(needed)}/{len(targets)} presets need writing: {sorted(needed)}")
+    print(f"[sync{tag}] {len(needed)}/{len(targets)} presets need writing: {sorted(needed)}")
 
     saved_vol = int(rc.GetVolume(InstanceID=0, Channel="Master")["CurrentVolume"])
     rc.SetMute(InstanceID=0, Channel="Master", DesiredMute="1")
@@ -215,9 +390,9 @@ def sync_presets(host: str, av, rc, presets: dict):
             except Exception:
                 pass
             time.sleep(0.4)
-            # IMPORTANT: empty CurrentURIMetaData. With DIDL, the speaker
-            # marks the now-playing item as isPresetable="false" and silently
-            # ignores the long-press save. The bridge applies DIDL at runtime.
+            # IMPORTANT: empty CurrentURIMetaData. With DIDL, the speaker marks
+            # the now-playing item as isPresetable="false" and silently ignores
+            # the long-press save. The bridge applies DIDL at runtime in play_preset().
             av.SetAVTransportURI(InstanceID=0, CurrentURI=url, CurrentURIMetaData="")
             av.Play(InstanceID=0, Speed="1")
             time.sleep(3.5)
@@ -227,27 +402,23 @@ def sync_presets(host: str, av, rc, presets: dict):
             time.sleep(2.0)
             stored = _current_preset_url(host, n)
             if stored == url:
-                print(f"[sync]  ✓ preset {n} -> {url}")
+                print(f"[sync{tag}]  ✓ preset {n} -> {url}")
             else:
-                print(f"[sync]  ✗ preset {n} did not stick (now: {stored})")
+                print(f"[sync{tag}]  ✗ preset {n} did not stick (now: {stored})")
         try:
             av.Stop(InstanceID=0)
         except Exception:
             pass
     finally:
         rc.SetMute(InstanceID=0, Channel="Master", DesiredMute="0")
-        print(f"[sync] unmuted, volume {saved_vol}")
+        print(f"[sync{tag}] unmuted, volume {saved_vol}")
 
 
 # ---------- MQTT -----------------------------------------------------------
 
 
 def fetch_mqtt_creds() -> dict | None:
-    """Find MQTT broker credentials.
-    In Supervisor: ask the Supervisor's `/services/mqtt` endpoint (auto-wired
-    when the user has the MQTT integration configured in HA Core).
-    Standalone: read from MQTT_HOST / MQTT_PORT / MQTT_USERNAME / MQTT_PASSWORD
-    environment variables. Returns None if neither is available."""
+    """Supervisor: ask /services/mqtt. Standalone: read MQTT_* env vars."""
     if SUPERVISOR_TOKEN:
         try:
             req = urllib.request.Request(
@@ -258,7 +429,6 @@ def fetch_mqtt_creds() -> dict | None:
                 return json.load(r).get("data")
         except Exception as e:
             print(f"[mqtt] supervisor MQTT lookup failed: {e}")
-            # fall through to env vars below
     host = os.environ.get("MQTT_HOST", "").strip()
     if not host:
         return None
@@ -271,7 +441,6 @@ def fetch_mqtt_creds() -> dict | None:
 
 
 def publish_discovery(client: mqtt.Client, device_id: str, friendly: str, model: str, presets: dict):
-    """Publish Home Assistant MQTT-discovery configs for the 6 preset buttons."""
     device = {
         "identifiers": [f"bose_soundtouch_{device_id}"],
         "name": f"Bose {friendly}",
@@ -282,7 +451,7 @@ def publish_discovery(client: mqtt.Client, device_id: str, friendly: str, model:
     for n in range(1, 7):
         meta = presets.get(n, {})
         url = meta.get("url", "")
-        label = meta.get("name") or (f"Preset {n}" if not url else f"Preset {n}")
+        label = meta.get("name") or f"Preset {n}"
         unique = f"bose_{device_id}_preset_{n}"
         cfg = {
             "name": f"Preset {n}: {label}" if url else f"Preset {n}",
@@ -297,53 +466,49 @@ def publish_discovery(client: mqtt.Client, device_id: str, friendly: str, model:
         }
         topic = f"homeassistant/button/{unique}/config"
         client.publish(topic, json.dumps(cfg), qos=1, retain=True)
-    print(f"[mqtt] published HA discovery for 6 buttons (device {device_id})")
+    print(f"[mqtt] published HA discovery for 6 buttons (device {device_id} / {friendly!r})")
 
 
-# ---------- main loop ------------------------------------------------------
+# ---------- per-speaker runner --------------------------------------------
 
 
-def main():
-    cfg = load_options()
-    host = (cfg.get("bose_host") or "").strip()
-    if not host:
-        print("[cfg] bose_host blank — auto-discovering via SSDP...")
-        host = discover_soundtouch()
-        if not host:
-            raise SystemExit(
-                "no SoundTouch found on the network. Set bose_host in the addon "
-                "Configuration tab and restart."
-            )
-        print(f"[cfg] discovered SoundTouch at {host}")
+def run_speaker(speaker: dict, sync_on_startup: bool, mqtt_client, play_registry: dict):
+    """Per-speaker worker: resolve UPnP services, optionally sync presets,
+    register the play callback, publish MQTT discovery, then run the WebSocket
+    loop forever with reconnect. Intended to run inside its own thread."""
+    host = speaker["host"]
+    device_id = speaker["device_id"]
+    friendly = speaker["friendly"]
+    tag = f" {friendly}"
 
-    device_id, friendly, model = fetch_speaker_info(host)
-    print(f"[upnp] speaker: {friendly} ({model}) — id {device_id}")
+    print(f"[{friendly}] starting (host={host}, id={device_id}, model={speaker['model']})")
 
-    presets = {}
-    for n in range(1, 7):
-        url = (cfg.get(f"preset_{n}_url") or "").strip()
-        if not url:
-            continue
+    presets: dict[int, dict] = {}
+    for n, url in speaker["presets"].items():
         meta = lookup_station(url)
         presets[n] = {"url": url, **meta}
-        print(f"[meta] preset {n}: {url} -> {meta or '(no metadata found)'}")
+        print(f"[meta{tag}] preset {n}: {url} -> {meta or '(no metadata found)'}")
 
-    av, rc = get_upnp_services(host, device_id)
+    try:
+        av, rc = get_upnp_services(host, device_id)
+    except Exception as e:
+        print(f"[upnp{tag}] failed to load services: {e} — speaker disabled")
+        return
 
-    if cfg.get("sync_presets_on_startup", True):
+    if sync_on_startup:
         try:
-            sync_presets(host, av, rc, presets)
+            sync_presets(host, av, rc, presets, tag=tag)
         except Exception as e:
-            print(f"[sync] failed: {e}")
+            print(f"[sync{tag}] failed: {e}")
 
     def play_preset(n: int):
         entry = presets.get(n)
         if not entry:
-            print(f"[play] preset {n} not configured")
+            print(f"[play{tag}] preset {n} not configured")
             return
         url = entry["url"]
         didl = build_didl(url, entry)
-        print(f"[play] preset {n} -> {url}")
+        print(f"[play{tag}] preset {n} -> {url}")
         try:
             try:
                 av.Stop(InstanceID=0)
@@ -352,78 +517,135 @@ def main():
             av.SetAVTransportURI(InstanceID=0, CurrentURI=url, CurrentURIMetaData=didl)
             av.Play(InstanceID=0, Speed="1")
         except Exception as e:
-            print(f"[play] failed: {e}")
+            print(f"[play{tag}] failed: {e}")
 
-    # MQTT --------------------------------------------------------------
-    mqtt_client = None
-    creds = fetch_mqtt_creds()
-    status_topic = f"bose_bridge/{device_id}/status"
-    if creds:
-        client = mqtt.Client(
-            mqtt.CallbackAPIVersion.VERSION2,
-            client_id=f"bose_bridge_{device_id}",
-        )
-        if creds.get("username"):
-            client.username_pw_set(creds["username"], creds.get("password", ""))
-        client.will_set(status_topic, "offline", qos=1, retain=True)
+    play_registry[device_id] = play_preset
 
-        def on_connect(c, _u, _f, rc, _p=None):
-            print(f"[mqtt] connected (rc={rc})")
-            publish_discovery(c, device_id, friendly, model, presets)
-            c.publish(status_topic, "online", qos=1, retain=True)
-            c.subscribe(f"bose_bridge/{device_id}/preset/+/command")
+    if mqtt_client is not None:
+        publish_discovery(mqtt_client, device_id, friendly, speaker["model"], presets)
+        mqtt_client.publish(f"bose_bridge/{device_id}/status", "online", qos=1, retain=True)
 
-        def on_message(_c, _u, msg):
-            m = re.search(r"/preset/(\d+)/command$", msg.topic)
-            if not m:
-                return
-            n = int(m.group(1))
-            print(f"[mqtt] preset {n} requested via HA")
-            play_preset(n)
-
-        client.on_connect = on_connect
-        client.on_message = on_message
-        try:
-            client.connect(creds["host"], int(creds.get("port", 1883)), keepalive=60)
-            client.loop_start()
-            mqtt_client = client
-        except Exception as e:
-            print(f"[mqtt] connect failed, continuing without HA control: {e}")
-    else:
-        print("[mqtt] no Supervisor MQTT credentials — HA buttons disabled")
-
-    # WebSocket loop ----------------------------------------------------
-    def on_message(_ws, msg):
+    def on_ws_message(_ws, msg):
         m = PRESET_RE.search(msg)
         if not m:
             return
         n = int(m.group(1))
         if n == 0:
             return
-        print(f"[ws] physical preset {n} press")
+        print(f"[ws{tag}] physical preset {n} press")
         play_preset(n)
 
-    def on_open(_ws):
-        print(f"[ws] connected to ws://{host}:8080")
+    def on_ws_open(_ws):
+        print(f"[ws{tag}] connected to ws://{host}:8080")
 
-    def on_error(_ws, e):
-        print(f"[ws] error: {e}")
+    def on_ws_error(_ws, e):
+        print(f"[ws{tag}] error: {e}")
 
-    def on_close(_ws, code, reason):
-        print(f"[ws] closed: {code} {reason}")
+    def on_ws_close(_ws, code, reason):
+        print(f"[ws{tag}] closed: {code} {reason}")
 
     while True:
         ws = websocket.WebSocketApp(
             f"ws://{host}:8080",
             subprotocols=["gabbo"],
-            on_open=on_open,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
+            on_open=on_ws_open,
+            on_message=on_ws_message,
+            on_error=on_ws_error,
+            on_close=on_ws_close,
         )
         ws.run_forever(ping_interval=30, ping_timeout=10)
-        print("[ws] reconnecting in 5s")
+        print(f"[ws{tag}] reconnecting in 5s")
         time.sleep(5)
+
+
+# ---------- main loop ------------------------------------------------------
+
+
+def _setup_mqtt(resolved: list[dict], play_registry: dict):
+    """Open a single MQTT connection shared by all speakers. The HA-command
+    subscription is a wildcard; messages are dispatched to the right speaker by
+    device_id extracted from the topic."""
+    creds = fetch_mqtt_creds()
+    if not creds:
+        print("[mqtt] no MQTT credentials — HA buttons disabled")
+        return None
+
+    client = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2,
+        client_id=f"bose_bridge_{os.getpid()}",
+    )
+    if creds.get("username"):
+        client.username_pw_set(creds["username"], creds.get("password", ""))
+
+    # paho supports only one will per connection. Use the first speaker as the
+    # canary — if the bridge dies mid-flight, at least that one shows offline.
+    # The others get an explicit "online" on connect and rely on the speaker
+    # threads to republish if they exit cleanly.
+    if resolved:
+        client.will_set(f"bose_bridge/{resolved[0]['device_id']}/status", "offline", qos=1, retain=True)
+
+    def on_connect(c, _u, _f, rc, _p=None):
+        print(f"[mqtt] connected (rc={rc})")
+        c.subscribe("bose_bridge/+/preset/+/command")
+
+    def on_message(_c, _u, msg):
+        m = MQTT_TOPIC_RE.match(msg.topic)
+        if not m:
+            return
+        device_id = m.group(1)
+        n = int(m.group(2))
+        play = play_registry.get(device_id)
+        if not play:
+            print(f"[mqtt] command for unknown device {device_id}")
+            return
+        print(f"[mqtt] device {device_id} preset {n} requested via HA")
+        play(n)
+
+    client.on_connect = on_connect
+    client.on_message = on_message
+    try:
+        client.connect(creds["host"], int(creds.get("port", 1883)), keepalive=60)
+        client.loop_start()
+        return client
+    except Exception as e:
+        print(f"[mqtt] connect failed, continuing without HA control: {e}")
+        return None
+
+
+def main():
+    cfg = load_options()
+    cfg_speakers = cfg["speakers"]
+    if not cfg_speakers:
+        raise SystemExit(
+            "no speakers configured. Add at least one entry under `speakers:` "
+            "(Supervisor) or set PRESET_*_URL / SPEAKERS_JSON (standalone)."
+        )
+
+    resolved = resolve_speakers(cfg_speakers)
+    if not resolved:
+        raise SystemExit("no speakers could be resolved — check host/name fields and SSDP reachability.")
+
+    print(f"[main] managing {len(resolved)} speaker(s): {[s['friendly'] for s in resolved]}")
+
+    play_registry: dict[str, callable] = {}
+    mqtt_client = _setup_mqtt(resolved, play_registry)
+
+    sync_on_startup = cfg["sync_presets_on_startup"]
+    threads: list[threading.Thread] = []
+    for speaker in resolved:
+        t = threading.Thread(
+            target=run_speaker,
+            args=(speaker, sync_on_startup, mqtt_client, play_registry),
+            name=f"speaker-{speaker['friendly']}",
+            daemon=True,
+        )
+        t.start()
+        threads.append(t)
+
+    # Speaker threads loop forever (reconnecting on WS failure). Block here so
+    # the process stays alive and signals propagate.
+    for t in threads:
+        t.join()
 
 
 if __name__ == "__main__":
