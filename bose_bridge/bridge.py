@@ -27,10 +27,15 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 
 import paho.mqtt.client as mqtt
 import upnpclient
 import websocket
+
+__version__ = "1.6.2"
+
+USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
 
 OPTIONS_PATH = "/data/options.json"
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
@@ -57,7 +62,7 @@ def _entry_has_content(e: dict) -> bool:
     )
 
 
-def _wildcard_from_flat(d: dict) -> dict | None:
+def _wildcard_from_toplevel(d: dict) -> dict | None:
     """Build a wildcard speaker entry from top-level `preset_N_url` fields.
     Returns None if no preset URLs are set."""
     presets = {
@@ -94,7 +99,7 @@ def load_options() -> dict:
         with open(OPTIONS_PATH) as f:
             raw = json.load(f)
         speakers = [s for s in (raw.get("speakers") or []) if _entry_has_content(s)]
-        flat = _wildcard_from_flat(raw)
+        flat = _wildcard_from_toplevel(raw)
         if flat and not _has_wildcard(speakers):
             speakers.append(flat)
         return {
@@ -115,7 +120,7 @@ def load_options() -> dict:
         except json.JSONDecodeError as e:
             print(f"[cfg] SPEAKERS_JSON invalid: {e}")
 
-    flat = _wildcard_from_flat({
+    flat = _wildcard_from_toplevel({
         f"preset_{n}_url": os.environ.get(f"PRESET_{n}_URL", "")
         for n in range(1, 7)
     })
@@ -159,7 +164,9 @@ def discover_soundtouch_all(timeout: float = 3.0) -> list[str]:
                 continue
             text = data.decode(errors="ignore")
             loc = next(
-                (l.split(": ", 1)[1].strip() for l in text.split("\r\n") if l.lower().startswith("location:")),
+                (line.split(": ", 1)[1].strip()
+                 for line in text.split("\r\n")
+                 if line.lower().startswith("location:")),
                 None,
             )
             if not loc:
@@ -254,7 +261,7 @@ def resolve_speakers(cfg_speakers: list[dict]) -> list[dict]:
             print("[cfg]")
             for _, _, friendly, _ in discovered:
                 print(f'[cfg]     - name: "{friendly}"')
-                print(f'[cfg]       preset_1_url: "http://your-stream.example/stream.mp3"')
+                print('[cfg]       preset_1_url: "http://your-stream.example/stream.mp3"')
             print("[cfg]")
 
     resolved: list[dict] = []
@@ -324,7 +331,7 @@ def lookup_station(url: str) -> dict:
                 data=body,
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
-                    "User-Agent": "homeassistant-bose-soundtouch-bridge/1.6.0",
+                    "User-Agent": USER_AGENT,
                 },
             )
             with urllib.request.urlopen(req, timeout=4) as r:
@@ -642,7 +649,7 @@ def main():
 
     print(f"[main] managing {len(resolved)} speaker(s): {[s['friendly'] for s in resolved]}")
 
-    play_registry: dict[str, callable] = {}
+    play_registry: dict[str, Callable[[int], None]] = {}
     mqtt_client = _setup_mqtt(resolved, play_registry)
 
     sync_on_startup = cfg["sync_presets_on_startup"]
