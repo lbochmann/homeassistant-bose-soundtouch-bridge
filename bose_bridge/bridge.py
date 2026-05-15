@@ -33,7 +33,7 @@ import paho.mqtt.client as mqtt
 import upnpclient
 import websocket
 
-__version__ = "1.6.2"
+__version__ = "1.7.0"
 
 USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
 
@@ -134,11 +134,17 @@ def load_options() -> dict:
 # ---------- Bose discovery -------------------------------------------------
 
 
-def discover_soundtouch_all(timeout: float = 3.0) -> list[str]:
-    """Return LAN IPs of every SoundTouch / Bose UPnP MediaRenderer that
-    responds to SSDP within `timeout`. Deduplicated by IP. Sends one M-SEARCH
-    and drains responses until the deadline (multiple speakers all reply to
-    the same packet)."""
+def discover_soundtouch_all(timeout: float = 3.0) -> dict[str, str]:
+    """Return {ip: upnp_description_url} for every SoundTouch / Bose UPnP
+    MediaRenderer that answers SSDP within `timeout`.
+
+    The value is the `LOCATION:` header the device itself advertises — the
+    authoritative UPnP device-description URL. We do NOT reconstruct it from
+    a guessed path/UUID: the description filename differs across SoundTouch
+    models/firmware (some serve it under a different name than the
+    `/XD/BO5EBO5E-…` path others use, which 404s). Sends one M-SEARCH and
+    drains responses until the deadline (speakers all reply to one packet).
+    """
     msg = (
         "M-SEARCH * HTTP/1.1\r\n"
         f"HOST: {SSDP_ADDR[0]}:{SSDP_ADDR[1]}\r\n"
@@ -148,7 +154,7 @@ def discover_soundtouch_all(timeout: float = 3.0) -> list[str]:
     ).encode()
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.sendto(msg, SSDP_ADDR)
-    found: dict[str, None] = {}
+    found: dict[str, str] = {}
     deadline = time.monotonic() + timeout
     try:
         while True:
@@ -176,10 +182,10 @@ def discover_soundtouch_all(timeout: float = 3.0) -> list[str]:
             except Exception:
                 continue
             if "SoundTouch" in desc or "Bose" in desc:
-                found[addr[0]] = None
+                found[addr[0]] = loc
     finally:
         s.close()
-    return list(found.keys())
+    return found
 
 
 def fetch_speaker_info(host: str) -> tuple[str, str, str]:
@@ -192,13 +198,40 @@ def fetch_speaker_info(host: str) -> tuple[str, str, str]:
     return device_id, (name.group(1) if name else "SoundTouch"), (model.group(1) if model else "SoundTouch")
 
 
-def get_upnp_services(host: str, device_id: str):
-    desc_url = f"http://{host}:8091/XD/BO5EBO5E-F00D-F00D-FEED-{device_id}.xml"
-    print(f"[upnp] description: {desc_url}")
-    d = upnpclient.Device(desc_url)
-    av = next(s for s in d.services if "AVTransport" in s.service_id)
-    rc = next(s for s in d.services if "RenderingControl" in s.service_id)
-    return av, rc
+def get_upnp_services(host: str, device_id: str, desc_url: str | None = None):
+    """Resolve the AVTransport + RenderingControl services for a speaker.
+
+    Tries, in order: the SSDP-advertised description URL (authoritative, when
+    known); a targeted SSDP lookup for host-pinned speakers that skipped
+    discovery; and finally the legacy hardcoded `/XD/BO5EBO5E-…` path as a
+    last resort. The hardcoded path works on most models but 404s on some
+    — SSDP is the robust source.
+    """
+    candidates: list[str] = []
+    if desc_url:
+        candidates.append(desc_url)
+    else:
+        # Host-pinned config that skipped discovery: do a short targeted
+        # SSDP sweep and pick this host's advertised description URL.
+        loc = discover_soundtouch_all(timeout=2.0).get(host)
+        if loc:
+            candidates.append(loc)
+    candidates.append(
+        f"http://{host}:8091/XD/BO5EBO5E-F00D-F00D-FEED-{device_id}.xml"
+    )
+
+    last_err: Exception | None = None
+    for url in candidates:
+        try:
+            print(f"[upnp] description: {url}")
+            d = upnpclient.Device(url)
+            av = next(s for s in d.services if "AVTransport" in s.service_id)
+            rc = next(s for s in d.services if "RenderingControl" in s.service_id)
+            return av, rc
+        except Exception as e:
+            last_err = e
+            print(f"[upnp] {url} failed: {e}")
+    raise last_err if last_err else RuntimeError("no UPnP description URL to try")
 
 
 # ---------- speaker resolution --------------------------------------------
@@ -223,7 +256,9 @@ def resolve_speakers(cfg_speakers: list[dict]) -> list[dict]:
 
     Only one wildcard entry is honoured; additional ones are ignored.
 
-    Returns dicts {host, device_id, friendly, model, presets:{n: url}}.
+    Returns dicts {host, device_id, friendly, model, desc_url, presets:{n: url}}.
+    `desc_url` is the SSDP-advertised UPnP description URL (None for
+    host-pinned speakers that skipped discovery — resolved later).
     """
     explicit: list[dict] = []
     wildcards: list[dict] = []
@@ -239,13 +274,14 @@ def resolve_speakers(cfg_speakers: list[dict]) -> list[dict]:
     needs_discovery = wildcard is not None or any(
         not (e.get("host") or "").strip() for e in explicit
     )
-    discovered: list[tuple[str, str, str, str]] = []
+    # (ip, device_id, friendly, model, desc_url)
+    discovered: list[tuple[str, str, str, str, str]] = []
     if needs_discovery:
         print("[cfg] discovering SoundTouch speakers via SSDP...")
-        for ip in discover_soundtouch_all():
+        for ip, loc in discover_soundtouch_all().items():
             try:
                 device_id, friendly, model = fetch_speaker_info(ip)
-                discovered.append((ip, device_id, friendly, model))
+                discovered.append((ip, device_id, friendly, model, loc))
                 print(f"[cfg] discovered: {friendly!r} ({model}) at {ip} — id {device_id}")
             except Exception as e:
                 print(f"[cfg] could not read /info from {ip}: {e}")
@@ -259,7 +295,7 @@ def resolve_speakers(cfg_speakers: list[dict]) -> list[dict]:
             # get to "auto-filling the form".)
             print("[cfg] to override presets for a specific speaker, copy one of these names into `speakers:`")
             print("[cfg]")
-            for _, _, friendly, _ in discovered:
+            for _, _, friendly, _, _ in discovered:
                 print(f'[cfg]     - name: "{friendly}"')
                 print('[cfg]       preset_1_url: "http://your-stream.example/stream.mp3"')
             print("[cfg]")
@@ -277,6 +313,10 @@ def resolve_speakers(cfg_speakers: list[dict]) -> list[dict]:
             except Exception as e:
                 print(f"[cfg] cannot reach configured host={host}: {e}")
                 continue
+            # If discovery ran for other entries, reuse this host's
+            # advertised description URL; otherwise get_upnp_services does
+            # a targeted SSDP lookup later.
+            desc_url = next((d[4] for d in discovered if d[0] == host), None)
         else:
             match = next(
                 (d for d in discovered if d[2].lower() == name.lower() and d[1] not in used_ids),
@@ -286,13 +326,14 @@ def resolve_speakers(cfg_speakers: list[dict]) -> list[dict]:
                 avail_names = [d[2] for d in discovered if d[1] not in used_ids]
                 print(f"[cfg] no discovered speaker matches name={name!r}; unclaimed: {avail_names}")
                 continue
-            host, device_id, friendly, model = match
+            host, device_id, friendly, model, desc_url = match
         used_ids.add(device_id)
         resolved.append({
             "host": host,
             "device_id": device_id,
             "friendly": friendly,
             "model": model,
+            "desc_url": desc_url,
             "presets": presets,
         })
 
@@ -305,13 +346,14 @@ def resolve_speakers(cfg_speakers: list[dict]) -> list[dict]:
             print("[cfg] wildcard entry has no unclaimed speakers to apply to")
         else:
             print(f"[cfg] applying wildcard preset map to {len(remaining)} speaker(s): {[d[2] for d in remaining]}")
-            for host, device_id, friendly, model in remaining:
+            for host, device_id, friendly, model, desc_url in remaining:
                 used_ids.add(device_id)
                 resolved.append({
                     "host": host,
                     "device_id": device_id,
                     "friendly": friendly,
                     "model": model,
+                    "desc_url": desc_url,
                     "presets": dict(presets),
                 })
 
@@ -512,7 +554,7 @@ def run_speaker(speaker: dict, sync_on_startup: bool, mqtt_client, play_registry
         print(f"[meta{tag}] preset {n}: {url} -> {meta or '(no metadata found)'}")
 
     try:
-        av, rc = get_upnp_services(host, device_id)
+        av, rc = get_upnp_services(host, device_id, speaker.get("desc_url"))
     except Exception as e:
         print(f"[upnp{tag}] failed to load services: {e} — speaker disabled")
         return
@@ -557,16 +599,30 @@ def run_speaker(speaker: dict, sync_on_startup: bool, mqtt_client, play_registry
         print(f"[ws{tag}] physical preset {n} press")
         play_preset(n)
 
+    conn: dict = {"opened_at": None, "last_error": None}
+
     def on_ws_open(_ws):
+        conn["opened_at"] = time.monotonic()
         print(f"[ws{tag}] connected to ws://{host}:8080")
 
     def on_ws_error(_ws, e):
-        print(f"[ws{tag}] error: {e}")
+        conn["last_error"] = str(e) or e.__class__.__name__
 
-    def on_ws_close(_ws, code, reason):
-        print(f"[ws{tag}] closed: {code} {reason}")
+    def on_ws_close(_ws, _code, _reason):
+        pass
 
+    # Reconnect with exponential backoff. A speaker that locks up (frozen
+    # firmware, Wi-Fi drop) is unreachable for minutes — a tight 5s loop
+    # just floods the log and hammers the network. Healthy long-lived
+    # sessions reset the backoff so a brief blip recovers fast.
+    BASE_BACKOFF = 5
+    MAX_BACKOFF = 60
+    HEALTHY_UPTIME = 60
+    backoff = BASE_BACKOFF
+    fails = 0
     while True:
+        conn["opened_at"] = None
+        conn["last_error"] = None
         ws = websocket.WebSocketApp(
             f"ws://{host}:8080",
             subprotocols=["gabbo"],
@@ -576,8 +632,24 @@ def run_speaker(speaker: dict, sync_on_startup: bool, mqtt_client, play_registry
             on_close=on_ws_close,
         )
         ws.run_forever(ping_interval=30, ping_timeout=10)
-        print(f"[ws{tag}] reconnecting in 5s")
-        time.sleep(5)
+
+        opened_at = conn["opened_at"]
+        uptime = (time.monotonic() - opened_at) if opened_at else 0.0
+        if uptime >= HEALTHY_UPTIME:
+            # Real session that dropped — treat as a one-off, recover fast.
+            fails = 0
+            backoff = BASE_BACKOFF
+            print(f"[ws{tag}] dropped after {int(uptime)}s up — reconnecting in {backoff}s")
+        else:
+            fails += 1
+            err = conn["last_error"] or "unreachable"
+            # Log the first few attempts, then only every ~12th, so a frozen
+            # speaker doesn't spam the log indefinitely.
+            if fails <= 3 or fails % 12 == 0:
+                print(f"[ws{tag}] {err} (attempt {fails}) — retrying in {backoff}s")
+        time.sleep(backoff)
+        if uptime < HEALTHY_UPTIME:
+            backoff = min(backoff * 2, MAX_BACKOFF)
 
 
 # ---------- main loop ------------------------------------------------------

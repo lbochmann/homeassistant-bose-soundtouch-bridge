@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.7.0
+
+- **Robust UPnP description discovery.** The add-on no longer
+  reconstructs the UPnP description URL from a guessed `/XD/BO5EBO5E-…`
+  path — that filename differs across SoundTouch models/firmware and
+  404s on some (e.g. certain ST-10s), which made the bridge fail at
+  `get_upnp_services` and leave the speaker unusable. It now uses the
+  `LOCATION:` URL the speaker advertises over SSDP, which is
+  authoritative. Host-pinned speakers that skip discovery get a short
+  targeted SSDP lookup; the old hardcoded path remains only as a
+  last-resort fallback.
+- **Exponential reconnect backoff with log dampening.** When a speaker
+  locks up (frozen firmware, Wi-Fi drop) it can be unreachable for
+  minutes. The WebSocket reconnect used to retry every 5s forever,
+  flooding the log and hammering the network. It now backs off
+  5s→10s→…→60s and only logs the first few attempts then every ~12th.
+  A healthy long-lived session resets the backoff so a brief blip still
+  recovers in ~5s.
+
 ## 1.6.2
 
 - On startup, the bridge now logs a copy-paste-ready YAML block listing
