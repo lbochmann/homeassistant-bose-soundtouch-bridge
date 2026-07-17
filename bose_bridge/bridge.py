@@ -37,7 +37,7 @@ import paho.mqtt.client as mqtt
 import upnpclient
 import websocket
 
-__version__ = "1.8.5"
+__version__ = "1.8.6"
 
 USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
 
@@ -207,6 +207,256 @@ def start_https_proxy(port: int = 9000) -> ThreadingHTTPServer:
     t = threading.Thread(target=server.serve_forever, daemon=True, name="https-proxy")
     t.start()
     return server
+
+
+# ---------- radio search server --------------------------------------------
+
+RADIO_SEARCH_PATH = "/radio-search"
+RADIO_SEARCH_PORT = 9002
+
+# HTML frontend — embedded so zero extra files needed
+_RADIO_SEARCH_HTML = """\
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SoundTouch Radio Search</title>
+<style>
+:root{--bg:#141414;--card:#1e1e1e;--border:#333;--accent:#4fc3f7;
+--text:#e0e0e0;--muted:#999;--success:#66bb6a}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+background:var(--bg);color:var(--text);padding:16px;max-width:640px;margin:0 auto}
+h1{font-size:1.3rem;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+h1 .icon{font-size:1.5rem}
+.search-box{display:flex;gap:8px;margin-bottom:16px}
+.search-box input{flex:1;padding:10px 14px;border:1px solid var(--border);
+border-radius:8px;background:var(--card);color:var(--text);font-size:.95rem;
+outline:none}
+.search-box input:focus{border-color:var(--accent)}
+.search-box button{padding:10px 20px;border:none;border-radius:8px;
+background:var(--accent);color:#000;font-weight:700;cursor:pointer;
+font-size:.95rem;white-space:nowrap}
+.search-box button:hover{opacity:.9}
+.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.filters select{padding:6px 10px;border:1px solid var(--border);border-radius:6px;
+background:var(--card);color:var(--text);font-size:.85rem}
+.filters select:focus{border-color:var(--accent)}
+#results{display:flex;flex-direction:column;gap:8px}
+.station-card{background:var(--card);border:1px solid var(--border);border-radius:10px;
+padding:12px;display:flex;gap:12px;align-items:center;transition:border-color .2s}
+.station-card:hover{border-color:var(--accent)}
+.station-card .favicon{width:48px;height:48px;border-radius:6px;
+object-fit:cover;flex-shrink:0;background:#222}
+.station-card .info{flex:1;min-width:0}
+.station-card .name{font-weight:600;font-size:.95rem;white-space:nowrap;
+overflow:hidden;text-overflow:ellipsis}
+.station-card .meta{font-size:.8rem;color:var(--muted);margin-top:2px;
+display:flex;gap:8px;flex-wrap:wrap}
+.station-card .meta span{display:flex;align-items:center;gap:3px}
+.station-card .actions{display:flex;gap:6px;flex-shrink:0}
+.station-card .actions button{padding:6px 12px;border:1px solid var(--border);
+border-radius:6px;background:transparent;color:var(--text);cursor:pointer;
+font-size:.8rem;white-space:nowrap;transition:all .2s}
+.station-card .actions button:hover{background:var(--accent);color:#000;
+border-color:var(--accent)}
+.station-card .actions button.copied{background:var(--success);color:#000;
+border-color:var(--success)}
+.loading{text-align:center;padding:24px;color:var(--muted)}
+.error{text-align:center;padding:16px;color:#ef5350}
+.empty{text-align:center;padding:32px;color:var(--muted)}
+.ha-info{background:#1a237e;border-radius:8px;padding:10px 14px;margin-bottom:16px;
+font-size:.85rem;color:#bbdefb;display:flex;align-items:center;gap:8px}
+</style>
+</head>
+<body>
+<h1><span class="icon">📻</span> SoundTouch Radio Search</h1>
+<div class="ha-info" id="haInfo" style="display:none">
+  ℹ️ Du befindest dich in der Home Assistant App. Die kopierte URL kannst du direkt als Preset eintragen.
+</div>
+<div class="search-box">
+  <input type="text" id="query" placeholder="Station, Genre oder Schlagwort..."
+         autofocus autocomplete="off">
+  <button onclick="doSearch()">Suchen</button>
+</div>
+<div class="filters">
+  <select id="lang">
+    <option value="">Alle Sprachen</option>
+    <option value="de" selected>🇩🇪 Deutsch</option>
+    <option value="en">🇬🇧 English</option>
+    <option value="at">🇦🇹 Österreich</option>
+    <option value="ch">🇨🇭 Schweiz</option>
+    <option value="fr">🇫🇷 Französisch</option>
+    <option value="it">🇮🇹 Italienisch</option>
+  </select>
+  <select id="sort">
+    <option value="votes">Meist geklickt</option>
+    <option value="name">Name A-Z</option>
+  </select>
+</div>
+<div id="results">
+  <div class="empty">Gib einen Suchbegriff ein und drücke Suchen.</div>
+</div>
+
+<script>
+// Check if embedded in HA Ingress
+if(window.top!==window.self){document.getElementById('haInfo').style.display='flex'}
+
+const queryInput=document.getElementById('query');
+const resultsDiv=document.getElementById('results');
+
+queryInput.addEventListener('keydown',e=>{if(e.key==='Enter')doSearch()});
+
+async function doSearch(){
+  const q=queryInput.value.trim();
+  if(!q){queryInput.focus();return}
+  const lang=document.getElementById('lang').value;
+  const sort=document.getElementById('sort').value;
+  resultsDiv.innerHTML='<div class="loading">🔍 Suche läuft...</div>';
+  const params=new URLSearchParams({q,lang,sort});
+  try{
+    const r=await fetch('/api/search?'+params);
+    if(!r.ok)throw new Error('API error');
+    const data=await r.json();
+    renderResults(data);
+  }catch(e){
+    resultsDiv.innerHTML='<div class="error">❌ Fehler: '+e.message+'</div>';
+  }
+}
+
+function renderResults(stations){
+  if(!stations.length){resultsDiv.innerHTML='<div class="empty">Keine Ergebnisse gefunden.</div>';return}
+  resultsDiv.innerHTML=stations.map((s,i)=>{
+    const name=esc(s.name||'Unbekannt');
+    const url=esc(s.url_resolved||s.url||'');
+    const favicon=esc(s.favicon||'');
+    const bitrate=(s.bitrate?s.bitrate+' kbps':'');
+    const tags=(s.tags||'').split(',').filter(Boolean).slice(0,3).map(esc).join(', ');
+    const country=esc(s.country||'');
+    const clickCount=s.click_count||0;
+    const fid=favicon?'<img class="favicon" src="'+esc(favicon)+'" onerror="this.src=\'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 48 48%22><text y=%2236%22 font-size=%2236%22>🎵</text></svg>\'">':'';
+    return '<div class="station-card">'+
+      fid+
+      '<div class="info">'+
+        '<div class="name">'+name+'</div>'+
+        '<div class="meta">'+
+          (country?'<span>🌍 '+country+'</span>':'')+
+          (bitrate?'<span>📡 '+bitrate+'</span>':'')+
+          (clickCount?'<span>👆 '+clickCount+'</span>':'')+
+          (tags?'<span>🏷️ '+tags+'</span>':'')+
+        '</div>'+
+      '</div>'+
+      '<div class="actions">'+
+        '<button onclick="copyUrl(this,\'"+url+"\')">'+'URL kopieren</button>'+
+      '</div>'+
+    '</div>';
+  }).join('');
+}
+
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+function copyUrl(btn,url){
+  navigator.clipboard.writeText(url).then(()=>{
+    btn.textContent='✓ Kopiert!';btn.classList.add('copied');
+    setTimeout(()=>{btn.textContent='URL kopieren';btn.classList.remove('copied')},2000);
+  }).catch(()=>{
+    // Fallback for older browsers
+    const ta=document.createElement('textarea');ta.value=url;
+    document.body.appendChild(ta);ta.select();document.execCommand('copy');
+    document.body.removeChild(ta);
+    btn.textContent='✓ Kopiert!';btn.classList.add('copied');
+    setTimeout(()=>{btn.textContent='URL kopieren';btn.classList.remove('copied')},2000);
+  });
+}
+</script>
+</body>
+</html>
+""";
+
+
+def _search_stations(query: str, lang: str = "", sort: str = "votes") -> list[dict]:
+    """Search radio stations via radio-browser.info API."""
+    params = urllib.parse.urlencode({"name": query, "language": lang or "all", "order": sort, "reverse": "true"})
+    for base in RADIO_BROWSER_BASES:
+        try:
+            url = f"{base}/json/stations/search?{params}"
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                stations = json.load(r)
+            # Filter: must have a playable URL
+            return [
+                {
+                    "name": s.get("name", ""),
+                    "url": s.get("url", ""),
+                    "url_resolved": s.get("url_resolved", ""),
+                    "favicon": s.get("favicon", ""),
+                    "tags": s.get("tags", ""),
+                    "country": s.get("country", ""),
+                    "bitrate": s.get("bitrate", 0),
+                    "click_count": s.get("click_count", 0),
+                    "codec": s.get("codec", ""),
+                }
+                for s in stations
+                if s.get("url") and s.get("url").startswith("http")
+            ][:50]
+        except Exception as e:
+            print(f"[search] {base} failed: {e}")
+            continue
+    return []
+
+
+class _RadioSearchHandler(BaseHTTPRequestHandler):
+    """HTTP handler for the radio search web UI."""
+
+    def do_GET(self):
+        if self.path == RADIO_SEARCH_PATH or self.path == RADIO_SEARCH_PATH + "/":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(_RADIO_SEARCH_HTML.encode("utf-8"))
+        elif self.path.startswith(RADIO_SEARCH_PATH + "/api/search"):
+            qs = urllib.parse.urlparse(self.path).query
+            params = urllib.parse.parse_qs(qs)
+            query = params.get("q", [""])[0]
+            lang = params.get("lang", [""])[0]
+            sort = params.get("sort", ["votes"])[0]
+            if not query:
+                self._json_response(400, {"error": "missing q parameter"})
+                return
+            stations = _search_stations(query, lang, sort)
+            self._json_response(200, stations)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def _json_response(self, code: int, data):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        # Silences request logs to keep HA log clean
+        pass
+
+
+def start_radio_search_server(port: int = RADIO_SEARCH_PORT) -> ThreadingHTTPServer | None:
+    """Start the radio search web UI server.
+
+    Returns the server object or None on failure.
+    """
+    try:
+        server = ThreadingHTTPServer(("0.0.0.0", port), _RadioSearchHandler)
+        t = threading.Thread(target=server.serve_forever, daemon=True, name="radio-search")
+        t.start()
+        print(f"[search] radio search listening on 0.0.0.0:{port}")
+        return server
+    except OSError as e:
+        print(f"[search] failed to start on port {port}: {e}")
+        return None
 
 
 # ---------- config ---------------------------------------------------------
@@ -907,6 +1157,9 @@ def main():
             print(f"[proxy] failed to start proxy on port {proxy_port}: {e} — HTTPS URLs will not work")
             proxy_port = None
 
+    # Start radio search web UI (always enabled — no config toggle needed).
+    radio_search_server: ThreadingHTTPServer | None = start_radio_search_server()
+
     play_registry: dict[str, Callable[[int], None]] = {}
     mqtt_client = _setup_mqtt(resolved, play_registry)
 
@@ -927,10 +1180,13 @@ def main():
     for t in threads:
         t.join()
 
-    # Shut down the proxy so the process can exit cleanly.
+    # Shut down servers so the process can exit cleanly.
     if proxy_server:
         proxy_server.shutdown()
         proxy_server.server_close()
+    if radio_search_server:
+        radio_search_server.shutdown()
+        radio_search_server.server_close()
 
 
 if __name__ == "__main__":

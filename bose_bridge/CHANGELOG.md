@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.8.6
+
+- **Radio station search via radio-browser.info.** Adds an embedded web UI
+  reachable at the add-on's Ingress port (9002) so you can search for radio
+  stations by name, genre, or language directly from the Home Assistant UI
+  — including station favicon, metadata, and one-click URL copy for
+  instant preset assignment. The search uses the free radio-browser.info API
+  (same backend as the existing metadata lookup) and requires no extra
+  dependencies.
+
 ## 1.8.5
 
 - **Suppress BrokenPipeError in proxy streaming.** When the speaker disconnects
