@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.8.0
+
+- **HTTPS stream support via embedded proxy.** The SoundTouch firmware's
+  UPnP stack only plays plain HTTP — it has no TLS client for HTTPS
+  URLs. This release adds a lightweight embedded HTTP proxy that
+  rewrites configured ``https://`` stream URLs into local ``http://``
+  requests, fetches the actual stream upstream with TLS termination,
+  and forwards the audio to the speaker. Toggle it on with
+  ``https_proxy: true`` (and optionally ``proxy_port``) in the
+  add-on config or ``HTTPS_PROXY=true`` for the standalone image.
+
 ## 1.7.0
 
 - **Robust UPnP description discovery.** The add-on no longer

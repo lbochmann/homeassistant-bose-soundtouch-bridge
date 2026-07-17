@@ -18,6 +18,7 @@ speaker handles the WebSocket loop; one shared MQTT client dispatches HA
 commands to the right speaker by `device_id`.
 """
 
+import base64
 import html
 import json
 import os
@@ -28,12 +29,13 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 import paho.mqtt.client as mqtt
 import upnpclient
 import websocket
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
 
@@ -49,6 +51,110 @@ PRESET_RE = re.compile(r'<nowSelectionUpdated>\s*<preset id="(\d+)"')
 MQTT_TOPIC_RE = re.compile(r"^bose_bridge/([^/]+)/preset/(\d+)/command$")
 SSDP_ADDR = ("239.255.255.250", 1900)
 SSDP_TARGET = "urn:schemas-upnp-org:device:MediaRenderer:1"
+HTTPS_PROXY_PATH = "/bose-proxy"
+
+
+def rewrite_url_for_proxy(url: str, proxy_port: int | None) -> str:
+    """Rewrite an HTTPS stream URL so the speaker can play it.
+
+    The SoundTouch firmware's UPnP stack only speaks plain HTTP on port 80.
+    When ``proxy_port`` is set we encode the real ``https://`` URL and
+    replace it with ``http://localhost:<port>/bose-proxy/<base64>`` so the
+    local proxy thread fetches and forwards the stream with TLS.
+
+    Returns the original URL unchanged when ``proxy_port`` is ``None`` or the
+    URL is already plain HTTP.
+    """
+    if proxy_port is None or not url.startswith("https://"):
+        return url
+    encoded = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+    return f"http://127.0.0.1:{proxy_port}{HTTPS_PROXY_PATH}/{encoded}"
+
+
+# ---------- HTTPS proxy ----------------------------------------------------
+
+class _HttpsProxyHandler(urllib.request.BaseHandler):
+    """Mixin: serve a proxied HTTPS URL for the speaker."""
+
+    def http_do_proxy(self, handler, proxy_port: int):
+        """Serve a proxied HTTPS URL for the speaker.
+
+        The speaker sends a plain HTTP GET to
+        http://localhost:<port>/bose-proxy/<base64_https_url>.
+        We fetch the real HTTPS URL upstream and stream the audio back.
+        """
+        path = handler.path
+        if not path.startswith(HTTPS_PROXY_PATH + "/"):
+            handler.send_response(404)
+            handler.end_headers()
+            return
+
+        b64 = path[len(HTTPS_PROXY_PATH) + 1:]
+        # Pad to valid base64 length (4n + 0/2/3 — never 4n+1).
+        pad = (4 - len(b64) % 4) % 4
+        try:
+            target_url = base64.urlsafe_b64decode(b64 + "=" * pad).decode()
+        except Exception:
+            handler.send_response(404)
+            handler.end_headers()
+            return
+
+        # Fetch upstream
+        req = urllib.request.Request(target_url, headers={
+            "User-Agent": USER_AGENT,
+        })
+        try:
+            upstream = urllib.request.urlopen(req, timeout=10)
+        except Exception as e:
+            handler.send_response(502)
+            handler.send_header("Content-Type", "text/plain")
+            handler.end_headers()
+            handler.wfile.write(f"upstream error: {e}".encode())
+            return
+
+        content_type = "audio/mpeg"
+        for hdr in ("Content-Type", "Content-Length"):
+            val = upstream.headers.get(hdr)
+            if val:
+                content_type = hdr == "Content-Type" and val or content_type
+        handler.send_response(200)
+        handler.send_header("Content-Type", content_type)
+        cl = upstream.headers.get("Content-Length")
+        if cl:
+            handler.send_header("Content-Length", cl)
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        while True:
+            chunk = upstream.read(65536)
+            if not chunk:
+                break
+            handler.wfile.write(chunk)
+        upstream.close()
+
+
+class _ProxyHandler(BaseHTTPRequestHandler, _HttpsProxyHandler):
+    """Small threading HTTP server that proxies HTTPS URLs for the speaker."""
+
+    # Silence request-line logs to keep the console clean
+    def log_message(self, format, *args):
+        pass
+
+    def do_GET(self):
+        proxy_port = getattr(self.server, "proxy_port", 9000)
+        self.http_do_proxy(self, proxy_port)
+
+
+def start_https_proxy(port: int = 9000) -> ThreadingHTTPServer:
+    """Start a lightweight HTTP proxy that rewrites speaker requests to HTTPS.
+
+    Returns the server object (caller should call server.server_close()
+    on shutdown).
+    """
+    server = ThreadingHTTPServer(("127.0.0.1", port), _ProxyHandler)
+    server.proxy_port = port  # type: ignore[attr-defined]
+    t = threading.Thread(target=server.serve_forever, daemon=True, name="https-proxy")
+    t.start()
+    return server
 
 
 # ---------- config ---------------------------------------------------------
@@ -80,7 +186,8 @@ def _has_wildcard(speakers: list[dict]) -> bool:
 
 
 def load_options() -> dict:
-    """Return {'speakers': [...], 'sync_presets_on_startup': bool}.
+    """Return {'speakers': [...], 'sync_presets_on_startup': bool,
+    'https_proxy': bool, 'proxy_port': int | None}.
 
     Supervisor (HAOS / Supervised): options come as JSON at /data/options.json.
     Standalone Docker: `SPEAKERS_JSON` env var holds the JSON-encoded list.
@@ -105,6 +212,8 @@ def load_options() -> dict:
         return {
             "speakers": speakers,
             "sync_presets_on_startup": raw.get("sync_presets_on_startup", True),
+            "https_proxy": raw.get("https_proxy", False),
+            "proxy_port": int(raw.get("proxy_port", 9000)),
         }
 
     print("[cfg] /data/options.json not found — reading config from environment")
@@ -128,7 +237,14 @@ def load_options() -> dict:
         speakers.append(flat)
 
     sync = os.environ.get("SYNC_PRESETS_ON_STARTUP", "true").lower() in ("1", "true", "yes", "on")
-    return {"speakers": speakers, "sync_presets_on_startup": sync}
+    https_proxy = os.environ.get("HTTPS_PROXY", "false").lower() in ("1", "true", "yes", "on")
+    proxy_port = int(os.environ.get("PROXY_PORT", "9000")) if https_proxy else None
+    return {
+        "speakers": speakers,
+        "sync_presets_on_startup": sync,
+        "https_proxy": https_proxy,
+        "proxy_port": proxy_port,
+    }
 
 
 # ---------- Bose discovery -------------------------------------------------
@@ -434,12 +550,14 @@ def _current_preset_url(host: str, n: int) -> str | None:
     return loc.group(1) if loc else None
 
 
-def sync_presets(host: str, av, rc, presets: dict, tag: str = ""):
+def sync_presets(host: str, av, rc, presets: dict, tag: str = "", proxy_port: int | None = None):
     """Save each configured preset onto the speaker so physical button presses
     emit a WebSocket event the bridge can intercept. Skips slots already in
     the right state. Mutes during the operation to hide audio blips."""
     targets = {n: e["url"] for n, e in presets.items() if e.get("url")}
-    needed = {n: u for n, u in targets.items() if _current_preset_url(host, n) != u}
+    # Rewrite URLs for proxy so the speaker can actually load them.
+    rewritten = {n: rewrite_url_for_proxy(u, proxy_port) for n, u in targets.items()}
+    needed = {n: u for n, u in rewritten.items() if _current_preset_url(host, n) != u}
     if not needed:
         print(f"[sync{tag}] all configured presets already match the device — skipping")
         return
@@ -448,7 +566,9 @@ def sync_presets(host: str, av, rc, presets: dict, tag: str = ""):
     saved_vol = int(rc.GetVolume(InstanceID=0, Channel="Master")["CurrentVolume"])
     rc.SetMute(InstanceID=0, Channel="Master", DesiredMute="1")
     try:
-        for n, url in needed.items():
+        for n, url in rewritten.items():
+            if n not in needed:
+                continue
             try:
                 av.Stop(InstanceID=0)
             except Exception:
@@ -536,7 +656,7 @@ def publish_discovery(client: mqtt.Client, device_id: str, friendly: str, model:
 # ---------- per-speaker runner --------------------------------------------
 
 
-def run_speaker(speaker: dict, sync_on_startup: bool, mqtt_client, play_registry: dict):
+def run_speaker(speaker: dict, sync_on_startup: bool, mqtt_client, play_registry: dict, proxy_port: int | None):
     """Per-speaker worker: resolve UPnP services, optionally sync presets,
     register the play callback, publish MQTT discovery, then run the WebSocket
     loop forever with reconnect. Intended to run inside its own thread."""
@@ -545,7 +665,7 @@ def run_speaker(speaker: dict, sync_on_startup: bool, mqtt_client, play_registry
     friendly = speaker["friendly"]
     tag = f" {friendly}"
 
-    print(f"[{friendly}] starting (host={host}, id={device_id}, model={speaker['model']})")
+    print(f"[{friendly}] starting (host={host}, id={device_id}, model={speaker['model']}, proxy_port={proxy_port})")
 
     presets: dict[int, dict] = {}
     for n, url in speaker["presets"].items():
@@ -561,7 +681,7 @@ def run_speaker(speaker: dict, sync_on_startup: bool, mqtt_client, play_registry
 
     if sync_on_startup:
         try:
-            sync_presets(host, av, rc, presets, tag=tag)
+            sync_presets(host, av, rc, presets, tag=tag, proxy_port=proxy_port)
         except Exception as e:
             print(f"[sync{tag}] failed: {e}")
 
@@ -570,9 +690,10 @@ def run_speaker(speaker: dict, sync_on_startup: bool, mqtt_client, play_registry
         if not entry:
             print(f"[play{tag}] preset {n} not configured")
             return
-        url = entry["url"]
+        raw_url = entry["url"]
+        url = rewrite_url_for_proxy(raw_url, proxy_port)
         didl = build_didl(url, entry)
-        print(f"[play{tag}] preset {n} -> {url}")
+        print(f"[play{tag}] preset {n} -> {url} (from {raw_url})")
         try:
             try:
                 av.Stop(InstanceID=0)
@@ -721,6 +842,19 @@ def main():
 
     print(f"[main] managing {len(resolved)} speaker(s): {[s['friendly'] for s in resolved]}")
 
+    # Start HTTPS proxy if enabled.
+    proxy_server: ThreadingHTTPServer | None = None
+    proxy_port: int | None = None
+    if cfg.get("https_proxy"):
+        proxy_port = cfg["proxy_port"]
+        assert proxy_port is not None
+        try:
+            proxy_server = start_https_proxy(proxy_port)
+            print(f"[proxy] HTTPS proxy listening on 127.0.0.1:{proxy_port}")
+        except OSError as e:
+            print(f"[proxy] failed to start proxy on port {proxy_port}: {e} — HTTPS URLs will not work")
+            proxy_port = None
+
     play_registry: dict[str, Callable[[int], None]] = {}
     mqtt_client = _setup_mqtt(resolved, play_registry)
 
@@ -729,7 +863,7 @@ def main():
     for speaker in resolved:
         t = threading.Thread(
             target=run_speaker,
-            args=(speaker, sync_on_startup, mqtt_client, play_registry),
+            args=(speaker, sync_on_startup, mqtt_client, play_registry, proxy_port),
             name=f"speaker-{speaker['friendly']}",
             daemon=True,
         )
@@ -740,6 +874,11 @@ def main():
     # the process stays alive and signals propagate.
     for t in threads:
         t.join()
+
+    # Shut down the proxy so the process can exit cleanly.
+    if proxy_server:
+        proxy_server.shutdown()
+        proxy_server.server_close()
 
 
 if __name__ == "__main__":

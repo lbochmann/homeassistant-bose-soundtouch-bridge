@@ -36,6 +36,8 @@ ENV PRESET_6_URL=""
 
 ENV SPEAKERS_JSON=""
 ENV SYNC_PRESETS_ON_STARTUP="true"
+ENV HTTPS_PROXY="false"
+ENV PROXY_PORT="9000"
 
 # MQTT (optional — leave MQTT_HOST blank to disable HA control buttons)
 ENV MQTT_HOST=""
