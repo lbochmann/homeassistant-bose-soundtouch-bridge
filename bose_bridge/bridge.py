@@ -325,49 +325,54 @@ async function doSearch(){
   }
 }
 
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+
 function renderResults(stations){
   if(!stations.length){resultsDiv.innerHTML='<div class="empty">Keine Ergebnisse gefunden.</div>';return}
-  resultsDiv.innerHTML=stations.map((s,i)=>{
-    const name=esc(s.name||'Unbekannt');
-    const url=esc(s.url_resolved||s.url||'');
-    const favicon=esc(s.favicon||'');
-    const bitrate=(s.bitrate?s.bitrate+' kbps':'');
-    const tags=(s.tags||'').split(',').filter(Boolean).slice(0,3).map(esc).join(', ');
-    const country=esc(s.country||'');
-    const clickCount=s.click_count||0;
-    const fid=favicon?'<img class="favicon" src="'+esc(favicon)+'" onerror="this.src=\'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 48 48%22><text y=%2236%22 font-size=%2236%22>🎵</text></svg>\'">':'';
+  const html=stations.map(s=>{
+    const n=esc(s.name||'Unbekannt');
+    const u=esc(s.url_resolved||s.url||'');
+    const f=esc(s.favicon||'');
+    const c=esc(s.country||'');
+    const b=s.bitrate?(s.bitrate+' kbps':'');
+    const t=(s.tags||'').split(',').filter(Boolean).slice(0,3).map(esc).join(', ');
+    const cc=s.click_count||0;
+    const img=f?'<img class="favicon" src="'+f+'" alt="">':'<div class="favicon" style="background:#222;display:flex;align-items:center;justify-content:center;font-size:24px;">🎵</div>';
     return '<div class="station-card">'+
-      fid+
+      img+
       '<div class="info">'+
-        '<div class="name">'+name+'</div>'+
+        '<div class="name">'+n+'</div>'+\
         '<div class="meta">'+
-          (country?'<span>🌍 '+country+'</span>':'')+
-          (bitrate?'<span>📡 '+bitrate+'</span>':'')+
-          (clickCount?'<span>👆 '+clickCount+'</span>':'')+
-          (tags?'<span>🏷️ '+tags+'</span>':'')+
-        '</div>'+
-      '</div>'+
+          (c?'<span>🌍 '+c+'</span>':'')+\
+          (b?'<span>📡 '+b+'</span>':'')+\
+          (cc?'<span>👆 '+cc+'</span>':'')+\
+          (t?'<span>🏷️ '+t+'</span>':'')+\
+        '</div>'+\
+      '</div>'+\
       '<div class="actions">'+
-        '<button onclick="copyUrl(this,\'"+url+"\')">'+'URL kopieren</button>'+
-      '</div>'+
+        '<button class="copy-btn" data-url="'+u+'">URL kopieren</button>'+
+      '</div>'+\
     '</div>';
   }).join('');
+  resultsDiv.innerHTML=html;
+  // Event delegation — no inline onclick, no escaping hell
+  resultsDiv.addEventListener('click',function(e){
+    const btn=e.target.closest('.copy-btn');
+    if(!btn)return;
+    const url=btn.getAttribute('data-url');
+    btn.textContent='✓ Kopiert!';btn.classList.add('copied');
+    setTimeout(()=>{btn.textContent='URL kopieren';btn.classList.remove('copied')},2000);
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(url).catch(()=>{fallbackCopy(url)});
+    }else{fallbackCopy(url)}
+  });
 }
 
-function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
-
-function copyUrl(btn,url){
-  navigator.clipboard.writeText(url).then(()=>{
-    btn.textContent='✓ Kopiert!';btn.classList.add('copied');
-    setTimeout(()=>{btn.textContent='URL kopieren';btn.classList.remove('copied')},2000);
-  }).catch(()=>{
-    // Fallback for older browsers
-    const ta=document.createElement('textarea');ta.value=url;
-    document.body.appendChild(ta);ta.select();document.execCommand('copy');
-    document.body.removeChild(ta);
-    btn.textContent='✓ Kopiert!';btn.classList.add('copied');
-    setTimeout(()=>{btn.textContent='URL kopieren';btn.classList.remove('copied')},2000);
-  });
+function fallbackCopy(url){
+  const ta=document.createElement('textarea');
+  ta.value=url;ta.style.position='fixed';ta.style.left='-9999px';
+  document.body.appendChild(ta);ta.select();document.execCommand('copy');
+  document.body.removeChild(ta);
 }
 </script>
 </body>

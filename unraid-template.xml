@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>bose-soundtouch-bridge</Name>
+  <Repository>ghcr.io/lbochmann/bose-soundtouch-bridge:latest</Repository>
+  <Registry>https://ghcr.io/lbochmann/bose-soundtouch-bridge</Registry>
+  <Network>host</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Project>https://github.com/lbochmann/homeassistant-bose-soundtouch-bridge</Project>
+  <Overview>Keeps Bose SoundTouch preset buttons working after the 2026 Bose cloud shutdown. Discovers speakers automatically via SSDP, maps physical preset buttons to your own stream URLs via UPnP, and optionally integrates with Home Assistant via MQTT. No cloud account required.</Overview>
+  <Category>HomeAutomation: MediaApp:</Category>
+  <WebUI/>
+  <TemplateURL>https://raw.githubusercontent.com/lbochmann/homeassistant-bose-soundtouch-bridge/main/unraid-template.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/lbochmann/homeassistant-bose-soundtouch-bridge/main/logo.png</Icon>
+  <ExtraParams/>
+  <Description>Keeps Bose SoundTouch preset buttons working after the 2026 Bose cloud shutdown. Discovers speakers automatically via SSDP, maps physical preset buttons to your own stream URLs via UPnP, and optionally integrates with Home Assistant via MQTT. No cloud account required.</Description>
+  <DonateText/>
+  <DonateLink/>
+
+  <!-- Preset URLs — applied as wildcard to all discovered speakers -->
+  <Config Name="Preset 1 URL" Target="PRESET_1_URL" Default="" Mode="" Description="Audio stream URL for physical preset button 1 (e.g. http://stream.example.com/radio.mp3). Applied to all discovered SoundTouch speakers unless overridden via SPEAKERS_JSON." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Preset 2 URL" Target="PRESET_2_URL" Default="" Mode="" Description="Audio stream URL for physical preset button 2." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Preset 3 URL" Target="PRESET_3_URL" Default="" Mode="" Description="Audio stream URL for physical preset button 3." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Preset 4 URL" Target="PRESET_4_URL" Default="" Mode="" Description="Audio stream URL for physical preset button 4." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Preset 5 URL" Target="PRESET_5_URL" Default="" Mode="" Description="Audio stream URL for physical preset button 5." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Preset 6 URL" Target="PRESET_6_URL" Default="" Mode="" Description="Audio stream URL for physical preset button 6." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+
+  <!-- Per-speaker overrides -->
+  <Config Name="Speakers JSON" Target="SPEAKERS_JSON" Default="" Mode="" Description="Optional. JSON array for per-speaker preset overrides. Example: [{&quot;name&quot;:&quot;SoundTouch 10 Wohnzimmer&quot;,&quot;preset_1_url&quot;:&quot;http://...&quot;}]. Leave empty to apply the same presets to all speakers." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+
+  <!-- Sync -->
+  <Config Name="Sync Presets on Startup" Target="SYNC_PRESETS_ON_STARTUP" Default="true" Mode="" Description="Write configured URLs into the speaker's preset slots on startup so physical buttons work immediately. Disable only if you want to manage presets manually." Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
+
+  <!-- MQTT / Home Assistant -->
+  <Config Name="MQTT Host" Target="MQTT_HOST" Default="" Mode="" Description="Optional. IP or hostname of your MQTT broker (e.g. 192.168.1.10). Required for Home Assistant button integration." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="MQTT Port" Target="MQTT_PORT" Default="1883" Mode="" Description="MQTT broker port. Default is 1883." Type="Variable" Display="advanced" Required="false" Mask="false">1883</Config>
+  <Config Name="MQTT Username" Target="MQTT_USER" Default="" Mode="" Description="Optional MQTT username." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="MQTT Password" Target="MQTT_PASSWORD" Default="" Mode="" Description="Optional MQTT password." Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+</Container>
