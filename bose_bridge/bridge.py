@@ -24,6 +24,7 @@ import json
 import os
 import re
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -39,6 +40,12 @@ import websocket
 __version__ = "1.8.3"
 
 USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
+
+# SSL context that skips certificate verification — the proxy is
+# just forwarding streams, we never store sensitive data.
+_PROXY_SSL_CTX = ssl.create_default_context()
+_PROXY_SSL_CTX.check_hostname = False
+_PROXY_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 OPTIONS_PATH = "/data/options.json"
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
@@ -130,7 +137,7 @@ class _HttpsProxyHandler(urllib.request.BaseHandler):
                          "AppleWebKit/537.36 (KHTML, like Gecko) "
                          "Chrome/120.0.0.0 Safari/537.36")
         try:
-            upstream = urllib.request.urlopen(req, timeout=10)
+            upstream = urllib.request.urlopen(req, timeout=10, context=_PROXY_SSL_CTX)
         except urllib.error.HTTPError as e:
             print(f"[proxy] upstream HTTP error {e.code}: {e.reason}")
             handler.send_response(e.code)
