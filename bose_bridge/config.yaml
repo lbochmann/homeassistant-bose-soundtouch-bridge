@@ -23,7 +23,6 @@ options:
   preset_6_url: ""
   speakers: []
   sync_presets_on_startup: true
-  https_proxy: false
   proxy_port: 9000
 schema:
   preset_1_url: str?
@@ -42,5 +41,4 @@ schema:
       preset_5_url: str?
       preset_6_url: str?
   sync_presets_on_startup: bool
-  https_proxy: bool
   proxy_port: int

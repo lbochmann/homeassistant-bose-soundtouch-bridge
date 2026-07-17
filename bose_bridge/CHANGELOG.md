@@ -10,6 +10,17 @@
   creating a separate host-pinned entry per speaker. Matches how most people
   actually use this add-on: identical presets across every SoundTouch on the
   LAN.
+- **Discovery no longer requires an existing preset.** Previously, SSDP
+  discovery only ran once at least one `preset_N_url` was already
+  configured, so a completely fresh install had no way to populate the radio
+  search UI's speaker list to set its *first* preset — chicken and egg.
+  Speakers are now always discovered and registered (with empty presets if
+  none are configured yet), so first-time setup can happen entirely through
+  the search UI's "save as preset" action.
+- **Removed the `https_proxy` on/off option — the HTTPS stream proxy is now
+  always on.** SoundTouch firmware only speaks plain HTTP, so there was never
+  a good reason to leave this off; `proxy_port` remains configurable in case
+  9000 collides with something else on the host.
 
 ## 1.9.1
 

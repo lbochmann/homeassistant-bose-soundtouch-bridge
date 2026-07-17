@@ -912,7 +912,7 @@ def _has_wildcard(speakers: list[dict]) -> bool:
 
 def load_options() -> dict:
     """Return {'speakers': [...], 'sync_presets_on_startup': bool,
-    'https_proxy': bool, 'proxy_port': int | None}.
+    'proxy_port': int}.
 
     Supervisor (HAOS / Supervised): options come as JSON at /data/options.json.
     Standalone Docker: `SPEAKERS_JSON` env var holds the JSON-encoded list.
@@ -926,6 +926,10 @@ def load_options() -> dict:
     `preset_1_url` .. `preset_6_url`. An entry with neither `host` nor `name`
     is a wildcard that fans out to every discovered speaker no explicit entry
     claimed.
+
+    The HTTPS stream proxy is always on (SoundTouch firmware only speaks
+    plain HTTP) — `proxy_port` is the only knob left, in case 9000 collides
+    with something else on the host.
     """
     if os.path.exists(OPTIONS_PATH):
         with open(OPTIONS_PATH) as f:
@@ -937,7 +941,6 @@ def load_options() -> dict:
         return {
             "speakers": speakers,
             "sync_presets_on_startup": raw.get("sync_presets_on_startup", True),
-            "https_proxy": raw.get("https_proxy", False),
             "proxy_port": int(raw.get("proxy_port", 9000)),
         }
 
@@ -962,13 +965,10 @@ def load_options() -> dict:
         speakers.append(flat)
 
     sync = os.environ.get("SYNC_PRESETS_ON_STARTUP", "true").lower() in ("1", "true", "yes", "on")
-    https_proxy = os.environ.get("HTTPS_PROXY", "false").lower() in ("1", "true", "yes", "on")
-    proxy_port = int(os.environ.get("PROXY_PORT", "9000")) if https_proxy else None
     return {
         "speakers": speakers,
         "sync_presets_on_startup": sync,
-        "https_proxy": https_proxy,
-        "proxy_port": proxy_port,
+        "proxy_port": int(os.environ.get("PROXY_PORT", "9000")),
     }
 
 
@@ -1112,7 +1112,11 @@ def resolve_speakers(cfg_speakers: list[dict]) -> list[dict]:
         print(f"[cfg] {len(wildcards)} wildcard speaker entries — only the first is used, the rest are ignored")
     wildcard = wildcards[0] if wildcards else None
 
-    needs_discovery = wildcard is not None or any(
+    # Discover even with zero config: without this, first-time setup has a
+    # chicken-and-egg problem where the radio search UI's "save as preset"
+    # needs a resolved speaker to save onto, but speakers only ever got
+    # resolved once at least one preset_N_url already existed.
+    needs_discovery = wildcard is not None or not cfg_speakers or any(
         not (e.get("host") or "").strip() for e in explicit
     )
     # (ip, device_id, friendly, model, desc_url)
@@ -1196,6 +1200,25 @@ def resolve_speakers(cfg_speakers: list[dict]) -> list[dict]:
                     "model": model,
                     "desc_url": desc_url,
                     "presets": dict(presets),
+                })
+    elif not cfg_speakers:
+        # No config at all yet — register every discovered speaker with an
+        # empty preset map so they show up in the radio search UI's "save as
+        # preset" picker instead of nothing being resolved until a preset
+        # already exists.
+        remaining = [d for d in discovered if d[1] not in used_ids]
+        if remaining:
+            print(f"[cfg] no presets configured yet — registering {len(remaining)} speaker(s) "
+                  f"with empty presets so they can be set via the radio search UI: {[d[2] for d in remaining]}")
+            for host, device_id, friendly, model, desc_url in remaining:
+                used_ids.add(device_id)
+                resolved.append({
+                    "host": host,
+                    "device_id": device_id,
+                    "friendly": friendly,
+                    "model": model,
+                    "desc_url": desc_url,
+                    "presets": {},
                 })
 
     return resolved
@@ -1692,16 +1715,12 @@ def main():
     except Exception as e:
         print(f"[search] failed to start: {e}")
 
-    cfg_speakers = cfg["speakers"]
-    if not cfg_speakers:
-        print(
-            "[cfg] no speakers configured. Radio search stays available; "
-            "add preset URLs or speaker entries to enable playback."
-        )
-        while True:
-            time.sleep(3600)
-
-    resolved = resolve_speakers(cfg_speakers)
+    # Always discover, even with zero configured presets — this is what lets
+    # the radio search UI's "save as preset" show speakers and set the very
+    # first preset. Discovery used to only run when at least one preset_N_url
+    # was already set, which was a chicken-and-egg problem for first-time
+    # setup via the search UI.
+    resolved = resolve_speakers(cfg["speakers"])
     if not resolved:
         print("[cfg] no speakers could be resolved — check host/name fields and SSDP reachability.")
         print("[cfg] radio search stays available while the add-on keeps running.")
@@ -1710,18 +1729,16 @@ def main():
 
     print(f"[main] managing {len(resolved)} speaker(s): {[s['friendly'] for s in resolved]}")
 
-    # Start HTTPS proxy if enabled.
+    # HTTPS stream proxy is always on — SoundTouch firmware only speaks plain
+    # HTTP, so any https:// preset needs this to play at all.
+    proxy_port: int | None = cfg["proxy_port"]
     proxy_server: ThreadingHTTPServer | None = None
-    proxy_port: int | None = None
-    if cfg.get("https_proxy"):
-        proxy_port = cfg["proxy_port"]
-        assert proxy_port is not None
-        try:
-            proxy_server = start_https_proxy(proxy_port)
-            print(f"[proxy] HTTPS proxy listening on 127.0.0.1:{proxy_port}")
-        except OSError as e:
-            print(f"[proxy] failed to start proxy on port {proxy_port}: {e} — HTTPS URLs will not work")
-            proxy_port = None
+    try:
+        proxy_server = start_https_proxy(proxy_port)
+        print(f"[proxy] HTTPS proxy listening on 0.0.0.0:{proxy_port}")
+    except OSError as e:
+        print(f"[proxy] failed to start proxy on port {proxy_port}: {e} — HTTPS stream URLs will not work")
+        proxy_port = None
 
     play_registry: dict[str, Callable[[int], None]] = {}
     mqtt_client = _setup_mqtt(resolved, play_registry)

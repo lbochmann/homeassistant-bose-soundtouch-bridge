@@ -36,7 +36,9 @@ ENV PRESET_6_URL=""
 
 ENV SPEAKERS_JSON=""
 ENV SYNC_PRESETS_ON_STARTUP="true"
-ENV HTTPS_PROXY="false"
+# HTTPS stream proxy is always on (SoundTouch firmware only speaks plain
+# HTTP) — only the port is configurable, in case 9000 collides with
+# something else on the host.
 ENV PROXY_PORT="9000"
 
 # MQTT (optional — leave MQTT_HOST blank to disable HA control buttons)
