@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.8.10
+
+- **Make radio search resilient to radio-browser mirror failures.** The search
+  now discovers available mirrors via `all.api.radio-browser.info`, shuffles
+  them, and falls back across HTTPS/HTTP mirrors before reporting an error.
+- **Show upstream search failures in the UI.** If radio-browser is unreachable,
+  the web UI now shows the actual upstream error instead of an empty result
+  list.
+- **Search station tags as a fallback.** Queries now try station names first
+  and tags/genres second, so searches like "rock" can return stations too.
+
 ## 1.8.9
 
 - **Keep radio search available during setup failures.** The embedded search

@@ -22,6 +22,7 @@ import base64
 import html
 import json
 import os
+import random
 import re
 import socket
 import ssl
@@ -37,7 +38,7 @@ import paho.mqtt.client as mqtt
 import upnpclient
 import websocket
 
-__version__ = "1.8.9"
+__version__ = "1.8.10"
 
 USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
 
@@ -50,11 +51,18 @@ _PROXY_SSL_CTX.verify_mode = ssl.CERT_NONE
 OPTIONS_PATH = "/data/options.json"
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
 SUPERVISOR_URL = "http://supervisor"
-RADIO_BROWSER_BASES = [
+RADIO_BROWSER_STATIC_BASES = [
     "https://de1.api.radio-browser.info",
     "https://nl1.api.radio-browser.info",
     "https://at1.api.radio-browser.info",
+    "https://fr1.api.radio-browser.info",
+    "https://fi1.api.radio-browser.info",
+    "http://de1.api.radio-browser.info",
+    "http://nl1.api.radio-browser.info",
+    "http://at1.api.radio-browser.info",
 ]
+RADIO_BROWSER_BASES = RADIO_BROWSER_STATIC_BASES
+_RADIO_BROWSER_BASE_CACHE = {"expires": 0.0, "bases": []}
 PRESET_RE = re.compile(r'<nowSelectionUpdated>\s*<preset id="(\d+)"')
 MQTT_TOPIC_RE = re.compile(r"^bose_bridge/([^/]+)/preset/(\d+)/command$")
 SSDP_ADDR = ("239.255.255.250", 1900)
@@ -317,8 +325,13 @@ async function doSearch(){
   const params=new URLSearchParams({q,country,sort});
   try{
     const r=await fetch(searchApiUrl(params));
-    if(!r.ok)throw new Error('API error');
+    if(!r.ok){
+      let msg='API error';
+      try{const err=await r.json();msg=err.error||msg}catch(_e){}
+      throw new Error(msg);
+    }
     const data=await r.json();
+    if(data.error)throw new Error(data.error);
     renderResults(data);
   }catch(e){
     resultsDiv.innerHTML='<div class="error">❌ Fehler: '+e.message+'</div>';
@@ -394,38 +407,109 @@ function fallbackCopy(url){
 """;
 
 
+class RadioSearchError(Exception):
+    pass
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _radio_browser_bases() -> list[str]:
+    """Return a shuffled, cached list of radio-browser API bases.
+
+    radio-browser.info explicitly recommends discovering mirrors via
+    all.api.radio-browser.info instead of pinning one hardcoded server.
+    """
+    now = time.monotonic()
+    cached = _RADIO_BROWSER_BASE_CACHE
+    if cached["bases"] and now < cached["expires"]:
+        return list(cached["bases"])
+
+    discovered: list[str] = []
+    try:
+        infos = socket.getaddrinfo("all.api.radio-browser.info", 443, type=socket.SOCK_STREAM)
+        ips = sorted({info[4][0] for info in infos})
+        for ip in ips:
+            try:
+                host = socket.gethostbyaddr(ip)[0].rstrip(".")
+            except Exception:
+                continue
+            if host.endswith(".api.radio-browser.info"):
+                discovered.append(f"https://{host}")
+                discovered.append(f"http://{host}")
+    except Exception as e:
+        print(f"[search] radio-browser server discovery failed: {e}")
+
+    random.shuffle(discovered)
+    bases = _dedupe(discovered + RADIO_BROWSER_STATIC_BASES)
+    cached["bases"] = bases
+    cached["expires"] = now + 3600
+    return bases
+
+
+def _fetch_radio_search(base: str, search_params: dict[str, str]) -> list[dict]:
+    params = urllib.parse.urlencode(search_params)
+    url = f"{base}/json/stations/search?{params}"
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=12, context=_PROXY_SSL_CTX if base.startswith("https://") else None) as r:
+        return json.load(r)
+
+
+def _station_result(s: dict) -> dict:
+    return {
+        "name": s.get("name", ""),
+        "url": s.get("url", ""),
+        "url_resolved": s.get("url_resolved", ""),
+        "favicon": s.get("favicon", ""),
+        "tags": s.get("tags", ""),
+        "country": s.get("country", ""),
+        "bitrate": s.get("bitrate", 0),
+        "click_count": s.get("click_count", 0),
+        "codec": s.get("codec", ""),
+        "stationuuid": s.get("stationuuid", ""),
+    }
+
+
 def _search_stations(query: str, country: str = "", sort: str = "votes") -> list[dict]:
     """Search radio stations via radio-browser.info API."""
-    search_params = {"name": query, "order": sort, "reverse": "true", "hidebroken": "true"}
+    reverse = "false" if sort == "name" else "true"
+    base_params = {"order": sort, "reverse": reverse, "hidebroken": "true", "limit": "50"}
     if country:
-        search_params["countrycode"] = country.upper()
-    params = urllib.parse.urlencode(search_params)
-    for base in RADIO_BROWSER_BASES:
+        base_params["countrycode"] = country.upper()
+
+    errors: list[str] = []
+    for base in _radio_browser_bases()[:8]:
         try:
-            url = f"{base}/json/stations/search?{params}"
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=5) as r:
-                stations = json.load(r)
-            # Filter: must have a playable URL
-            return [
-                {
-                    "name": s.get("name", ""),
-                    "url": s.get("url", ""),
-                    "url_resolved": s.get("url_resolved", ""),
-                    "favicon": s.get("favicon", ""),
-                    "tags": s.get("tags", ""),
-                    "country": s.get("country", ""),
-                    "bitrate": s.get("bitrate", 0),
-                    "click_count": s.get("click_count", 0),
-                    "codec": s.get("codec", ""),
-                }
-                for s in stations
-                if s.get("url") and s.get("url").startswith("http")
-            ][:50]
+            stations = _fetch_radio_search(base, {**base_params, "name": query})
+            if not stations:
+                stations = _fetch_radio_search(base, {**base_params, "tag": query})
+            results: list[dict] = []
+            seen: set[str] = set()
+            for s in stations:
+                url = s.get("url_resolved") or s.get("url") or ""
+                if not url.startswith("http"):
+                    continue
+                key = s.get("stationuuid") or url
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(_station_result(s))
+            print(f"[search] {base} returned {len(results)} result(s) for {query!r}")
+            return results[:50]
         except Exception as e:
-            print(f"[search] {base} failed: {e}")
+            msg = f"{base}: {e}"
+            errors.append(msg)
+            print(f"[search] {msg}")
             continue
-    return []
+    raise RadioSearchError("radio-browser currently unreachable: " + " | ".join(errors[-3:]))
 
 
 class _RadioSearchHandler(BaseHTTPRequestHandler):
@@ -447,7 +531,11 @@ class _RadioSearchHandler(BaseHTTPRequestHandler):
             if not query:
                 self._json_response(400, {"error": "missing q parameter"})
                 return
-            stations = _search_stations(query, country, sort)
+            try:
+                stations = _search_stations(query, country, sort)
+            except RadioSearchError as e:
+                self._json_response(502, {"error": str(e)})
+                return
             self._json_response(200, stations)
         else:
             self.send_response(404)
