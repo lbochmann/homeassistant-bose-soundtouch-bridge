@@ -37,7 +37,7 @@ import paho.mqtt.client as mqtt
 import upnpclient
 import websocket
 
-__version__ = "1.8.4"
+__version__ = "1.8.5"
 
 USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
 
@@ -175,8 +175,12 @@ class _HttpsProxyHandler(urllib.request.BaseHandler):
             if not chunk:
                 print(f"[proxy] done — {total_bytes} bytes streamed")
                 break
-            handler.wfile.write(chunk)
-            total_bytes += len(chunk)
+            try:
+                handler.wfile.write(chunk)
+                total_bytes += len(chunk)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                print(f"[proxy] client disconnected — {total_bytes} bytes streamed so far")
+                break
         upstream.close()
 
 

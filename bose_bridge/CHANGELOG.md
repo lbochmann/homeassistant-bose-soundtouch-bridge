@@ -1,6 +1,13 @@
 # Changelog
 
-## 1.8.3
+## 1.8.5
+
+- **Suppress BrokenPipeError in proxy streaming.** When the speaker disconnects
+  mid-stream (station change, stop), the proxy wrote to a closed socket and
+  printed a full traceback. Now catches `BrokenPipeError` / `ConnectionResetError`
+  and exits the streaming loop cleanly.
+
+## 1.8.4
 
 - **Fix proxy loopback.** The proxy URL was rewritten to `127.0.0.1` which is the
   speaker's own loopback — the speaker can never reach HA. Now detects HA's LAN
