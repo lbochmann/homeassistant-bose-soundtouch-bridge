@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.9.2
+
+- **"Save as preset" can now target all speakers at once.** The save dialog
+  has a new "🌐 Alle Lautsprecher" option alongside the per-speaker list —
+  picking it writes the preset live onto every currently running speaker and
+  persists it as the top-level `preset_N_url` wildcard (the same "same
+  presets on every speaker" mechanism used for the initial setup), instead of
+  creating a separate host-pinned entry per speaker. Matches how most people
+  actually use this add-on: identical presets across every SoundTouch on the
+  LAN.
+
 ## 1.9.1
 
 - **Save a search result directly as a preset (Supervisor add-on only).**

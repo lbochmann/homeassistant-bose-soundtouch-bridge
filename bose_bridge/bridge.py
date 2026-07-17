@@ -38,7 +38,7 @@ import paho.mqtt.client as mqtt
 import upnpclient
 import websocket
 
-__version__ = "1.9.1"
+__version__ = "1.9.2"
 
 USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
 
@@ -512,14 +512,31 @@ function openPresetModal(station){
   modalStationName.textContent=station.name;
   modalStatus.textContent='';
   modalStatus.className='modal-status';
-  modalSpeaker.innerHTML=SPEAKERS.map(s=>`<option value="${s.device_id}">${esc(s.friendly)}</option>`).join('');
+  const speakerOptions=SPEAKERS.map(s=>`<option value="${s.device_id}">${esc(s.friendly)}</option>`).join('');
+  modalSpeaker.innerHTML=`<option value="global">🌐 Alle Lautsprecher</option>`+speakerOptions;
   fillSlotOptions();
   modal.style.display='flex';
 }
 
+// For the "all speakers" preview: shows the shared URL's name if every
+// speaker currently agrees on this slot, otherwise flags it as mixed rather
+// than picking one arbitrarily and misleading the user about what a global
+// save would overwrite.
+function globalPresetsPreview(){
+  const presets={};
+  for(let i=1;i<=6;i++){
+    const entries=SPEAKERS.map(s=>s.presets[String(i)]).filter(e=>e&&e.url);
+    const urls=new Set(entries.map(e=>e.url));
+    if(urls.size===0){presets[String(i)]={url:'',name:''}}
+    else if(urls.size===1){presets[String(i)]=entries[0]}
+    else{presets[String(i)]={url:'(unterschiedlich)',name:'(unterschiedlich je Lautsprecher)'}}
+  }
+  return presets;
+}
+
 function fillSlotOptions(){
-  const speaker=SPEAKERS.find(s=>s.device_id===modalSpeaker.value)||SPEAKERS[0];
-  const presets=speaker?speaker.presets:{};
+  const isGlobal=modalSpeaker.value==='global';
+  const presets=isGlobal?globalPresetsPreview():((SPEAKERS.find(s=>s.device_id===modalSpeaker.value)||{}).presets||{});
   modalSlot.innerHTML='';
   for(let i=1;i<=6;i++){
     const p=presets[String(i)];
@@ -548,8 +565,9 @@ async function doSavePreset(confirmOverwrite){
     if(r.status===409){
       const data=await r.json();
       const existingLabel=(data.existing&&(data.existing.name||data.existing.url))||'ein Sender';
+      const scopeNote=data.scope==='global'?' (betrifft alle Lautsprecher)':'';
       modalSave.disabled=false;
-      if(confirm(`Preset ${n} ist bereits belegt mit "${existingLabel}". Überschreiben?`)){
+      if(confirm(`Preset ${n} ist bereits belegt mit "${existingLabel}"${scopeNote}. Überschreiben?`)){
         return doSavePreset(true);
       }
       modalStatus.textContent='Abgebrochen.';
@@ -558,7 +576,8 @@ async function doSavePreset(confirmOverwrite){
     const data=await r.json();
     if(!r.ok||data.error){throw new Error(data.error||'Speichern fehlgeschlagen')}
     modalStatus.className='modal-status ok';
-    modalStatus.textContent=data.stuck?'✓ Gespeichert.':'✓ Gespeichert (Gerät hat den Slot evtl. nicht bestätigt).';
+    const okText=data.count?`✓ Auf ${data.count} Lautsprechern gespeichert.`:'✓ Gespeichert.';
+    modalStatus.textContent=data.stuck?okText:okText+' (mindestens ein Gerät hat den Slot evtl. nicht bestätigt)';
     setTimeout(()=>{modal.style.display='none'},1500);
   }catch(e){
     modalStatus.className='modal-status error';
@@ -761,6 +780,11 @@ class _RadioSearchHandler(BaseHTTPRequestHandler):
         confirm = bool(payload.get("confirm"))
 
         registry = getattr(self.server, "speaker_registry", None) or {}
+
+        if device_id == "global":
+            self._save_global_preset(registry, n, url, name, favicon, confirm)
+            return
+
         speaker = registry.get(device_id)
         if not speaker:
             self._json_response(404, {"error": f"unknown or not-yet-ready speaker {device_id}"})
@@ -789,6 +813,44 @@ class _RadioSearchHandler(BaseHTTPRequestHandler):
 
         persisted = persist_preset_to_supervisor(speaker["host"], speaker["friendly"], n, url, speaker["presets"])
         self._json_response(200, {"ok": True, "stuck": stuck, "persisted": persisted})
+
+    def _save_global_preset(self, registry: dict, n: int, url: str, name: str, favicon: str, confirm: bool):
+        """Write preset `n` = `url` onto every currently running speaker and
+        persist it as the top-level `preset_N_url` wildcard, mirroring the
+        existing "same presets on every speaker" convenience config."""
+        if not registry:
+            self._json_response(404, {"error": "no speakers are currently running"})
+            return
+
+        occupied = [s for s in registry.values() if (e := s["presets"].get(n)) and e.get("url")]
+        if occupied and not confirm:
+            sample = occupied[0]["presets"][n]
+            self._json_response(409, {
+                "conflict": True,
+                "scope": "global",
+                "existing": {"name": sample.get("name") or "", "url": sample["url"]},
+            })
+            return
+
+        results: dict[str, bool] = {}
+        for device_id, speaker in registry.items():
+            try:
+                stuck = save_preset_live(speaker["host"], speaker["av"], speaker["rc"], n, url, speaker["proxy_port"])
+            except Exception as e:
+                print(f"[search] writing preset {n} to {speaker['friendly']} failed: {e}")
+                stuck = False
+            speaker["presets"][n] = {"url": url, "name": name, "favicon": favicon}
+            results[device_id] = stuck
+            if not stuck:
+                print(f"[search] preset {n} for {speaker['friendly']} written but device didn't confirm it stuck")
+
+        persisted = persist_global_preset_to_supervisor(n, url)
+        self._json_response(200, {
+            "ok": True,
+            "stuck": all(results.values()),
+            "persisted": persisted,
+            "count": len(results),
+        })
 
     def _json_response(self, code: int, data):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -1371,6 +1433,22 @@ def persist_preset_to_supervisor(host: str, friendly: str, n: int, url: str, liv
         return True
     except Exception as e:
         print(f"[search] persisting preset to Supervisor config failed (live write still applied): {e}")
+        return False
+
+
+def persist_global_preset_to_supervisor(n: int, url: str) -> bool:
+    """Save preset `n` = `url` as the top-level `preset_N_url` option — the
+    same wildcard mechanism `_wildcard_from_toplevel()` fans out to every
+    speaker that no explicit `speakers:` entry has claimed. Used by the
+    "save for all speakers" action in the search UI."""
+    try:
+        info = _supervisor_request("GET", "info")
+        options = dict((info or {}).get("options") or {})
+        options[f"preset_{n}_url"] = url
+        _supervisor_request("POST", "options", {"options": options})
+        return True
+    except Exception as e:
+        print(f"[search] persisting global preset to Supervisor config failed (live writes still applied): {e}")
         return False
 
 
