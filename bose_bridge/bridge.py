@@ -124,10 +124,11 @@ class _HttpsProxyHandler(urllib.request.BaseHandler):
 
         print(f"[proxy] proxying {target_url}")
 
-        # Fetch upstream
-        req = urllib.request.Request(target_url, headers={
-            "User-Agent": USER_AGENT,
-        })
+        # Fetch upstream — use browser-like User-Agent to avoid geo/UA blocking
+        req = urllib.request.Request(target_url)
+        req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                         "AppleWebKit/537.36 (KHTML, like Gecko) "
+                         "Chrome/120.0.0.0 Safari/537.36")
         try:
             upstream = urllib.request.urlopen(req, timeout=10)
         except urllib.error.HTTPError as e:
