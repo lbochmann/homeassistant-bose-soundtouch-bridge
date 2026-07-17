@@ -1,9 +1,16 @@
 # Changelog
 
+## 1.8.1
+
+- **Proxy logging.** Added comprehensive logging at every proxy failure
+  point so issues can be diagnosed via HA logs: bad paths, bad base64,
+  upstream HTTP errors (403, 404, etc.), connection errors, bytes
+  streamed. All log lines prefixed with ``[proxy]``.
+
 ## 1.8.0
 
 - **HTTPS stream support via embedded proxy.** The SoundTouch firmware's
-  UPnP stack only plays plain HTTP — it has no TLS client for HTTPS
+  UPnP stack only speaks plain HTTP — it has no TLS client for HTTPS
   URLs. This release adds a lightweight embedded HTTP proxy that
   rewrites configured ``https://`` stream URLs into local ``http://``
   requests, fetches the actual stream upstream with TLS termination,

@@ -37,7 +37,7 @@ import paho.mqtt.client as mqtt
 import upnpclient
 import websocket
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 
 USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
 _LOGGER = logging.getLogger(__name__)
