@@ -19,6 +19,7 @@ commands to the right speaker by `device_id`.
 """
 
 import base64
+import logging
 import html
 import json
 import os
@@ -26,6 +27,7 @@ import re
 import socket
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
@@ -38,6 +40,7 @@ import websocket
 __version__ = "1.8.0"
 
 USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
+_LOGGER = logging.getLogger(__name__)
 
 OPTIONS_PATH = "/data/options.json"
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
@@ -85,6 +88,7 @@ class _HttpsProxyHandler(urllib.request.BaseHandler):
         """
         path = handler.path
         if not path.startswith(HTTPS_PROXY_PATH + "/"):
+            _LOGGER.error("[proxy] 404 bad path: %s", path)
             handler.send_response(404)
             handler.end_headers()
             return
@@ -95,9 +99,12 @@ class _HttpsProxyHandler(urllib.request.BaseHandler):
         try:
             target_url = base64.urlsafe_b64decode(b64 + "=" * pad).decode()
         except Exception:
+            _LOGGER.error("[proxy] 400 bad base64: %s", b64[:80])
             handler.send_response(404)
             handler.end_headers()
             return
+
+        _LOGGER.info("[proxy] proxying %s", target_url)
 
         # Fetch upstream
         req = urllib.request.Request(target_url, headers={
@@ -105,7 +112,15 @@ class _HttpsProxyHandler(urllib.request.BaseHandler):
         })
         try:
             upstream = urllib.request.urlopen(req, timeout=10)
+        except urllib.error.HTTPError as e:
+            _LOGGER.error("[proxy] upstream HTTP error %s: %s", e.code, e.reason)
+            handler.send_response(e.code)
+            handler.send_header("Content-Type", "text/plain")
+            handler.end_headers()
+            handler.wfile.write(f"upstream error {e.code}: {e.reason}".encode())
+            return
         except Exception as e:
+            _LOGGER.error("[proxy] upstream connection error: %s", e)
             handler.send_response(502)
             handler.send_header("Content-Type", "text/plain")
             handler.end_headers()
@@ -117,6 +132,8 @@ class _HttpsProxyHandler(urllib.request.BaseHandler):
             val = upstream.headers.get(hdr)
             if val:
                 content_type = hdr == "Content-Type" and val or content_type
+        _LOGGER.info("[proxy] upstream OK — Content-Type=%s", content_type)
+
         handler.send_response(200)
         handler.send_header("Content-Type", content_type)
         cl = upstream.headers.get("Content-Length")
@@ -124,20 +141,25 @@ class _HttpsProxyHandler(urllib.request.BaseHandler):
             handler.send_header("Content-Length", cl)
         handler.send_header("Connection", "close")
         handler.end_headers()
+
+        # Stream audio back with progress logging
+        total_bytes = 0
         while True:
             chunk = upstream.read(65536)
             if not chunk:
+                _LOGGER.info("[proxy] done — %d bytes streamed", total_bytes)
                 break
             handler.wfile.write(chunk)
+            total_bytes += len(chunk)
         upstream.close()
 
 
 class _ProxyHandler(BaseHTTPRequestHandler, _HttpsProxyHandler):
     """Small threading HTTP server that proxies HTTPS URLs for the speaker."""
 
-    # Silence request-line logs to keep the console clean
+    # Log requests via the module logger so they appear in HA logs
     def log_message(self, format, *args):
-        pass
+        _LOGGER.info("[proxy] %s", format % args)
 
     def do_GET(self):
         proxy_port = getattr(self.server, "proxy_port", 9000)
