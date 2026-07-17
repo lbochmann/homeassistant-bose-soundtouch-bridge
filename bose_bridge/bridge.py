@@ -410,7 +410,8 @@ class _RadioSearchHandler(BaseHTTPRequestHandler):
     """HTTP handler for the radio search web UI."""
 
     def do_GET(self):
-        if self.path == RADIO_SEARCH_PATH or self.path == RADIO_SEARCH_PATH + "/":
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/" or path == RADIO_SEARCH_PATH or path == RADIO_SEARCH_PATH + "/":
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
