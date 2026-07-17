@@ -38,15 +38,19 @@ import paho.mqtt.client as mqtt
 import upnpclient
 import websocket
 
-__version__ = "1.8.10"
+__version__ = "1.9.0"
 
 USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
 
-# SSL context that skips certificate verification — the proxy is
-# just forwarding streams, we never store sensitive data.
-_PROXY_SSL_CTX = ssl.create_default_context()
-_PROXY_SSL_CTX.check_hostname = False
-_PROXY_SSL_CTX.verify_mode = ssl.CERT_NONE
+# Fallback context used ONLY when a stream server's certificate fails
+# verification under the normal (secure) default context — some small
+# internet radio stations run misconfigured/expired TLS. Every other HTTPS
+# call in this file (radio-browser.info, Supervisor API) uses the regular
+# verified default context; this fallback is scoped to _open_upstream() and
+# only engaged after a verification failure, with a log line naming the URL.
+_INSECURE_FALLBACK_SSL_CTX = ssl.create_default_context()
+_INSECURE_FALLBACK_SSL_CTX.check_hostname = False
+_INSECURE_FALLBACK_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 OPTIONS_PATH = "/data/options.json"
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
@@ -61,7 +65,6 @@ RADIO_BROWSER_STATIC_BASES = [
     "http://nl1.api.radio-browser.info",
     "http://at1.api.radio-browser.info",
 ]
-RADIO_BROWSER_BASES = RADIO_BROWSER_STATIC_BASES
 _RADIO_BROWSER_BASE_CACHE = {"expires": 0.0, "bases": []}
 PRESET_RE = re.compile(r'<nowSelectionUpdated>\s*<preset id="(\d+)"')
 MQTT_TOPIC_RE = re.compile(r"^bose_bridge/([^/]+)/preset/(\d+)/command$")
@@ -112,6 +115,24 @@ def rewrite_url_for_proxy(url: str, proxy_port: int | None) -> str:
 class _HttpsProxyHandler(urllib.request.BaseHandler):
     """Mixin: serve a proxied HTTPS URL for the speaker."""
 
+    @staticmethod
+    def _open_upstream(req: urllib.request.Request, target_url: str):
+        """Open the upstream stream, verifying certs by default.
+
+        Falls back to an unverified context only if the *first* attempt fails
+        specifically on certificate verification — some small internet radio
+        stations run expired/misconfigured TLS. Any other error (DNS,
+        connection refused, HTTP status) propagates unchanged so the caller's
+        existing error handling deals with it."""
+        try:
+            return urllib.request.urlopen(req, timeout=10)
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, ssl.SSLCertVerificationError):
+                print(f"[proxy] TLS cert verification failed for {target_url} "
+                      f"— retrying without verification: {e.reason}")
+                return urllib.request.urlopen(req, timeout=10, context=_INSECURE_FALLBACK_SSL_CTX)
+            raise
+
     def http_do_proxy(self, handler, proxy_port: int):
         """Serve a proxied HTTPS URL for the speaker.
 
@@ -133,7 +154,17 @@ class _HttpsProxyHandler(urllib.request.BaseHandler):
             target_url = base64.urlsafe_b64decode(b64 + "=" * pad).decode()
         except Exception:
             print(f"[proxy] 400 bad base64: {b64[:80]}")
-            handler.send_response(404)
+            handler.send_response(400)
+            handler.end_headers()
+            return
+
+        # Only ever proxy plain http/https stream URLs. Without this check a
+        # client could ask us to fetch e.g. file:///proc/self/environ or
+        # file:///data/options.json — urllib happily opens file:// URLs, and
+        # this endpoint is unauthenticated on the LAN (host_network: true).
+        if urllib.parse.urlparse(target_url).scheme not in ("http", "https"):
+            print(f"[proxy] 400 rejected non-http(s) scheme: {target_url[:120]!r}")
+            handler.send_response(400)
             handler.end_headers()
             return
 
@@ -145,7 +176,7 @@ class _HttpsProxyHandler(urllib.request.BaseHandler):
                          "AppleWebKit/537.36 (KHTML, like Gecko) "
                          "Chrome/120.0.0.0 Safari/537.36")
         try:
-            upstream = urllib.request.urlopen(req, timeout=10, context=_PROXY_SSL_CTX)
+            upstream = self._open_upstream(req, target_url)
         except urllib.error.HTTPError as e:
             print(f"[proxy] upstream HTTP error {e.code}: {e.reason}")
             handler.send_response(e.code)
@@ -161,11 +192,7 @@ class _HttpsProxyHandler(urllib.request.BaseHandler):
             handler.wfile.write(f"upstream error: {e}".encode())
             return
 
-        content_type = "audio/mpeg"
-        for hdr in ("Content-Type", "Content-Length"):
-            val = upstream.headers.get(hdr)
-            if val:
-                content_type = hdr == "Content-Type" and val or content_type
+        content_type = upstream.headers.get("Content-Type") or "audio/mpeg"
         print(f"[proxy] upstream OK — Content-Type={content_type}")
 
         handler.send_response(200)
@@ -459,7 +486,7 @@ def _fetch_radio_search(base: str, search_params: dict[str, str]) -> list[dict]:
     params = urllib.parse.urlencode(search_params)
     url = f"{base}/json/stations/search?{params}"
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=12, context=_PROXY_SSL_CTX if base.startswith("https://") else None) as r:
+    with urllib.request.urlopen(req, timeout=12) as r:
         return json.load(r)
 
 
@@ -895,7 +922,7 @@ def resolve_speakers(cfg_speakers: list[dict]) -> list[dict]:
 def lookup_station(url: str) -> dict:
     """Return {'name': str, 'favicon': str} or empty dict if not found."""
     body = urllib.parse.urlencode({"url": url}).encode()
-    for base in RADIO_BROWSER_BASES:
+    for base in _radio_browser_bases()[:8]:
         try:
             req = urllib.request.Request(
                 f"{base}/json/stations/byurl",

@@ -4,7 +4,7 @@
 
 FROM python:3.12-alpine
 
-RUN apk add --no-cache libxml2 libxslt \
+RUN apk add --no-cache libxml2 libxslt ca-certificates \
  && apk add --no-cache --virtual .build-deps gcc musl-dev libxml2-dev libxslt-dev \
  && pip install --no-cache-dir \
         upnpclient \

@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.9.0
+
+- **Fix SSRF/local-file-read in the HTTPS stream proxy.** The proxy now
+  rejects any target URL whose scheme isn't `http`/`https` before fetching
+  it. Previously a client on the LAN could ask the proxy to fetch e.g.
+  `file:///data/options.json` or `file:///proc/self/environ` and have the
+  contents streamed back, since `urlopen()` was never restricted to network
+  schemes.
+- **Verify TLS certificates by default everywhere.** Radio-browser.info
+  lookups (search + preset metadata) now use the standard verified SSL
+  context instead of a blanket `CERT_NONE` context. The stream proxy still
+  verifies by default and only falls back to an unverified context for a
+  single request after a genuine certificate-verification failure, logging
+  the affected URL — instead of trusting every upstream unconditionally.
+- **Install `ca-certificates` explicitly** in both Dockerfiles so the system
+  CA bundle used for the above verification is guaranteed present and
+  updated on every image rebuild, rather than relying on it coming in
+  transitively.
+- Minor cleanup: dead `Content-Length` branch in the proxy's content-type
+  detection, wrong 404 status on a malformed base64 proxy path (now 400),
+  and `lookup_station()` now uses the same resilient mirror-discovery as
+  radio search instead of a separate static server list.
+
 ## 1.8.10
 
 - **Make radio search resilient to radio-browser mirror failures.** The search
