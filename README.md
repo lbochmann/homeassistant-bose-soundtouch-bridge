@@ -9,6 +9,8 @@ The add-on listens to each speaker's local WebSocket and, when you press
 a preset button, plays the URL you configured for that slot via local
 UPnP — no Bose cloud needed. One instance manages every SoundTouch on
 the LAN; each speaker can have its own preset map or share a default.
+It also includes a Home Assistant Ingress search page for finding direct
+radio stream URLs via radio-browser.info.
 
 See [`bose_bridge/README.md`](bose_bridge/README.md) for the
 configuration reference.

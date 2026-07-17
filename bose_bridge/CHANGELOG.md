@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.8.8
+
+- **Fix Home Assistant Ingress radio search.** The search frontend now calls
+  its API relative to the current Ingress path instead of using `/api/search`,
+  which Home Assistant can intercept before it reaches the add-on.
+- **Use country filters for radio-browser.info.** The search UI now sends
+  `countrycode` values such as `DE`, `AT`, and `CH`, which are more reliable
+  for regional station searches than short language codes.
+- **Align runtime and add-on metadata versions.** `bridge.py` and
+  `config.yaml` now both report `1.8.8`.
+
 ## 1.8.6
 
 - **Radio station search via radio-browser.info.** Adds an embedded web UI

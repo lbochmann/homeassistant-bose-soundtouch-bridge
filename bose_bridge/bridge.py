@@ -37,7 +37,7 @@ import paho.mqtt.client as mqtt
 import upnpclient
 import websocket
 
-__version__ = "1.8.6"
+__version__ = "1.8.8"
 
 USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
 
@@ -281,14 +281,14 @@ font-size:.85rem;color:#bbdefb;display:flex;align-items:center;gap:8px}
   <button onclick="doSearch()">Suchen</button>
 </div>
 <div class="filters">
-  <select id="lang">
-    <option value="">Alle Sprachen</option>
-    <option value="de" selected>🇩🇪 Deutsch</option>
-    <option value="en">🇬🇧 English</option>
-    <option value="at">🇦🇹 Österreich</option>
-    <option value="ch">🇨🇭 Schweiz</option>
-    <option value="fr">🇫🇷 Französisch</option>
-    <option value="it">🇮🇹 Italienisch</option>
+  <select id="country">
+    <option value="">Alle Länder</option>
+    <option value="DE" selected>🇩🇪 Deutschland</option>
+    <option value="AT">🇦🇹 Österreich</option>
+    <option value="CH">🇨🇭 Schweiz</option>
+    <option value="GB">🇬🇧 Großbritannien</option>
+    <option value="FR">🇫🇷 Frankreich</option>
+    <option value="IT">🇮🇹 Italien</option>
   </select>
   <select id="sort">
     <option value="votes">Meist geklickt</option>
@@ -311,18 +311,31 @@ queryInput.addEventListener('keydown',e=>{if(e.key==='Enter')doSearch()});
 async function doSearch(){
   const q=queryInput.value.trim();
   if(!q){queryInput.focus();return}
-  const lang=document.getElementById('lang').value;
+  const country=document.getElementById('country').value;
   const sort=document.getElementById('sort').value;
   resultsDiv.innerHTML='<div class="loading">🔍 Suche läuft...</div>';
-  const params=new URLSearchParams({q,lang,sort});
+  const params=new URLSearchParams({q,country,sort});
   try{
-    const r=await fetch('/api/search?'+params);
+    const r=await fetch(searchApiUrl(params));
     if(!r.ok)throw new Error('API error');
     const data=await r.json();
     renderResults(data);
   }catch(e){
     resultsDiv.innerHTML='<div class="error">❌ Fehler: '+e.message+'</div>';
   }
+}
+
+function searchApiUrl(params){
+  const path=window.location.pathname;
+  let base=path;
+  if(base.endsWith('/radio-search/')){
+    base=base.slice(0,-'radio-search/'.length);
+  }else if(base.endsWith('/radio-search')){
+    base=base.slice(0,-'radio-search'.length);
+  }else if(!base.endsWith('/')){
+    base+='/';
+  }
+  return base+'api/search?'+params;
 }
 
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
@@ -334,39 +347,40 @@ function renderResults(stations){
     const u=esc(s.url_resolved||s.url||'');
     const f=esc(s.favicon||'');
     const c=esc(s.country||'');
-    const b=s.bitrate?(s.bitrate+' kbps':'');
+    const b=s.bitrate?(s.bitrate+' kbps'):'';
     const t=(s.tags||'').split(',').filter(Boolean).slice(0,3).map(esc).join(', ');
     const cc=s.click_count||0;
     const img=f?'<img class="favicon" src="'+f+'" alt="">':'<div class="favicon" style="background:#222;display:flex;align-items:center;justify-content:center;font-size:24px;">🎵</div>';
-    return '<div class="station-card">'+
-      img+
-      '<div class="info">'+
-        '<div class="name">'+n+'</div>'+\
-        '<div class="meta">'+
-          (c?'<span>🌍 '+c+'</span>':'')+\
-          (b?'<span>📡 '+b+'</span>':'')+\
-          (cc?'<span>👆 '+cc+'</span>':'')+\
-          (t?'<span>🏷️ '+t+'</span>':'')+\
-        '</div>'+\
-      '</div>'+\
-      '<div class="actions">'+
-        '<button class="copy-btn" data-url="'+u+'">URL kopieren</button>'+
-      '</div>'+\
-    '</div>';
+    return `<div class="station-card">
+      ${img}
+      <div class="info">
+        <div class="name">${n}</div>
+        <div class="meta">
+          ${c?'<span>🌍 '+c+'</span>':''}
+          ${b?'<span>📡 '+b+'</span>':''}
+          ${cc?'<span>👆 '+cc+'</span>':''}
+          ${t?'<span>🏷️ '+t+'</span>':''}
+        </div>
+      </div>
+      <div class="actions">
+        <button class="copy-btn" data-url="${u}">URL kopieren</button>
+      </div>
+    </div>`;
   }).join('');
   resultsDiv.innerHTML=html;
-  // Event delegation — no inline onclick, no escaping hell
-  resultsDiv.addEventListener('click',function(e){
-    const btn=e.target.closest('.copy-btn');
-    if(!btn)return;
-    const url=btn.getAttribute('data-url');
-    btn.textContent='✓ Kopiert!';btn.classList.add('copied');
-    setTimeout(()=>{btn.textContent='URL kopieren';btn.classList.remove('copied')},2000);
-    if(navigator.clipboard&&navigator.clipboard.writeText){
-      navigator.clipboard.writeText(url).catch(()=>{fallbackCopy(url)});
-    }else{fallbackCopy(url)}
-  });
 }
+
+// Event delegation — no inline onclick, no escaping hell
+resultsDiv.addEventListener('click',function(e){
+  const btn=e.target.closest('.copy-btn');
+  if(!btn)return;
+  const url=btn.getAttribute('data-url');
+  btn.textContent='✓ Kopiert!';btn.classList.add('copied');
+  setTimeout(()=>{btn.textContent='URL kopieren';btn.classList.remove('copied')},2000);
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(url).catch(()=>{fallbackCopy(url)});
+  }else{fallbackCopy(url)}
+});
 
 function fallbackCopy(url){
   const ta=document.createElement('textarea');
@@ -380,9 +394,12 @@ function fallbackCopy(url){
 """;
 
 
-def _search_stations(query: str, lang: str = "", sort: str = "votes") -> list[dict]:
+def _search_stations(query: str, country: str = "", sort: str = "votes") -> list[dict]:
     """Search radio stations via radio-browser.info API."""
-    params = urllib.parse.urlencode({"name": query, "language": lang or "all", "order": sort, "reverse": "true"})
+    search_params = {"name": query, "order": sort, "reverse": "true", "hidebroken": "true"}
+    if country:
+        search_params["countrycode"] = country.upper()
+    params = urllib.parse.urlencode(search_params)
     for base in RADIO_BROWSER_BASES:
         try:
             url = f"{base}/json/stations/search?{params}"
@@ -421,16 +438,16 @@ class _RadioSearchHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(_RADIO_SEARCH_HTML.encode("utf-8"))
-        elif self.path.startswith(RADIO_SEARCH_PATH + "/api/search"):
+        elif path == "/api/search" or path.startswith(RADIO_SEARCH_PATH + "/api/search"):
             qs = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(qs)
             query = params.get("q", [""])[0]
-            lang = params.get("lang", [""])[0]
+            country = params.get("country", [""])[0]
             sort = params.get("sort", ["votes"])[0]
             if not query:
                 self._json_response(400, {"error": "missing q parameter"})
                 return
-            stations = _search_stations(query, lang, sort)
+            stations = _search_stations(query, country, sort)
             self._json_response(200, stations)
         else:
             self.send_response(404)
@@ -1163,8 +1180,12 @@ def main():
             print(f"[proxy] failed to start proxy on port {proxy_port}: {e} — HTTPS URLs will not work")
             proxy_port = None
 
-    # Start radio search web UI (always enabled — no config toggle needed).
-    radio_search_server: ThreadingHTTPServer | None = start_radio_search_server()
+    # Start radio search web UI (always enabled — fail-safe like proxy).
+    radio_search_server: ThreadingHTTPServer | None = None
+    try:
+        radio_search_server = start_radio_search_server()
+    except Exception as e:
+        print(f"[search] failed to start: {e}")
 
     play_registry: dict[str, Callable[[int], None]] = {}
     mqtt_client = _setup_mqtt(resolved, play_registry)
@@ -1196,4 +1217,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"[main] unhandled error: {e}")
+        import traceback; traceback.print_exc()
+        raise SystemExit(1)

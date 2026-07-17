@@ -107,6 +107,15 @@ HA. Pressing one in the HA UI / automations / scripts plays the same
 URL the physical button would. Falls back gracefully if MQTT is
 unavailable — only physical buttons keep working.
 
+### Radio stream search
+
+The add-on includes a small radio-browser.info search page in Home
+Assistant Ingress. Open the add-on page, use **Open Web UI**, search for
+a station, then copy the resolved stream URL into one of the
+`preset_N_url` fields. The search runs on the add-on's Ingress port
+`9002` and also works directly at `http://<ha-host>:9002/` when the
+container is reachable on the LAN.
+
 ## Example URLs (Belgian / Flemish radio)
 
 | Preset | Station | URL |
