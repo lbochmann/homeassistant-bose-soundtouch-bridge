@@ -37,7 +37,7 @@ import paho.mqtt.client as mqtt
 import upnpclient
 import websocket
 
-__version__ = "1.8.8"
+__version__ = "1.8.9"
 
 USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
 
@@ -1154,16 +1154,30 @@ def _setup_mqtt(resolved: list[dict], play_registry: dict):
 
 def main():
     cfg = load_options()
+
+    # Start radio search web UI before speaker resolution so Home Assistant
+    # Ingress remains available even when presets/speakers still need setup.
+    radio_search_server: ThreadingHTTPServer | None = None
+    try:
+        radio_search_server = start_radio_search_server()
+    except Exception as e:
+        print(f"[search] failed to start: {e}")
+
     cfg_speakers = cfg["speakers"]
     if not cfg_speakers:
-        raise SystemExit(
-            "no speakers configured. Add at least one entry under `speakers:` "
-            "(Supervisor) or set `SPEAKERS_JSON` (standalone)."
+        print(
+            "[cfg] no speakers configured. Radio search stays available; "
+            "add preset URLs or speaker entries to enable playback."
         )
+        while True:
+            time.sleep(3600)
 
     resolved = resolve_speakers(cfg_speakers)
     if not resolved:
-        raise SystemExit("no speakers could be resolved — check host/name fields and SSDP reachability.")
+        print("[cfg] no speakers could be resolved — check host/name fields and SSDP reachability.")
+        print("[cfg] radio search stays available while the add-on keeps running.")
+        while True:
+            time.sleep(3600)
 
     print(f"[main] managing {len(resolved)} speaker(s): {[s['friendly'] for s in resolved]}")
 
@@ -1179,13 +1193,6 @@ def main():
         except OSError as e:
             print(f"[proxy] failed to start proxy on port {proxy_port}: {e} — HTTPS URLs will not work")
             proxy_port = None
-
-    # Start radio search web UI (always enabled — fail-safe like proxy).
-    radio_search_server: ThreadingHTTPServer | None = None
-    try:
-        radio_search_server = start_radio_search_server()
-    except Exception as e:
-        print(f"[search] failed to start: {e}")
 
     play_registry: dict[str, Callable[[int], None]] = {}
     mqtt_client = _setup_mqtt(resolved, play_registry)

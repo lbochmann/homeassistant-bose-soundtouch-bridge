@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.8.9
+
+- **Keep radio search available during setup failures.** The embedded search
+  server now starts before speaker validation/discovery. If no speakers are
+  configured or no speaker can be resolved, the add-on stays running so Home
+  Assistant Ingress can still open the search UI.
+
 ## 1.8.8
 
 - **Fix Home Assistant Ingress radio search.** The search frontend now calls
