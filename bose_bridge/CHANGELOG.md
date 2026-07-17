@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.8.3
+
+- **Fix proxy loopback.** The proxy URL was rewritten to `127.0.0.1` which is the
+  speaker's own loopback — the speaker can never reach HA. Now detects HA's LAN
+  IP and uses it in rewritten URLs. The proxy also binds to `0.0.0.0` so the
+  speaker on the network can actually connect.
+- **Browser User-Agent for upstream requests.** Radio stations were blocking the
+  bridge's self-identifying User-Agent header. The proxy now sends a Chrome-like
+  browser User-Agent to avoid UA-based blocking.
+
 ## 1.8.2
 
 - **Fix proxy logging.** Switched from `logging` module to `print()` so proxy
