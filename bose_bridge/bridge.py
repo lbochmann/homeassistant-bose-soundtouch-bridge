@@ -55,21 +55,41 @@ SSDP_TARGET = "urn:schemas-upnp-org:device:MediaRenderer:1"
 HTTPS_PROXY_PATH = "/bose-proxy"
 
 
+def get_local_ip() -> str:
+    """Return the machine's primary LAN IP (non-loopback)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
 def rewrite_url_for_proxy(url: str, proxy_port: int | None) -> str:
     """Rewrite an HTTPS stream URL so the speaker can play it.
 
     The SoundTouch firmware's UPnP stack only speaks plain HTTP on port 80.
     When ``proxy_port`` is set we encode the real ``https://`` URL and
-    replace it with ``http://localhost:<port>/bose-proxy/<base64>`` so the
-    local proxy thread fetches and forwards the stream with TLS.
+    replace it with ``http://<ha_lan_ip>:<port>/bose-proxy/<base64>`` so the
+    speaker connects to HA's LAN address.
 
     Returns the original URL unchanged when ``proxy_port`` is ``None`` or the
     URL is already plain HTTP.
     """
     if proxy_port is None or not url.startswith("https://"):
         return url
+    # Detect HA's LAN IP so the speaker can reach the proxy
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ha_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        ha_ip = "127.0.0.1"
     encoded = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
-    return f"http://127.0.0.1:{proxy_port}{HTTPS_PROXY_PATH}/{encoded}"
+    return f"http://{ha_ip}:{proxy_port}{HTTPS_PROXY_PATH}/{encoded}"
 
 
 # ---------- HTTPS proxy ----------------------------------------------------
@@ -170,7 +190,7 @@ def start_https_proxy(port: int = 9000) -> ThreadingHTTPServer:
     Returns the server object (caller should call server.server_close()
     on shutdown).
     """
-    server = ThreadingHTTPServer(("127.0.0.1", port), _ProxyHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), _ProxyHandler)
     server.proxy_port = port  # type: ignore[attr-defined]
     t = threading.Thread(target=server.serve_forever, daemon=True, name="https-proxy")
     t.start()
