@@ -38,7 +38,7 @@ import paho.mqtt.client as mqtt
 import upnpclient
 import websocket
 
-__version__ = "1.9.0"
+__version__ = "1.9.1"
 
 USER_AGENT = f"homeassistant-bose-soundtouch-bridge/{__version__}"
 
@@ -55,6 +55,11 @@ _INSECURE_FALLBACK_SSL_CTX.verify_mode = ssl.CERT_NONE
 OPTIONS_PATH = "/data/options.json"
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
 SUPERVISOR_URL = "http://supervisor"
+# Whether we're running as a Supervisor add-on (vs. standalone Docker). Gates
+# features that need Supervisor's own APIs — currently: saving a preset from
+# the radio search UI, which persists into /data/options.json via
+# /addons/self/options. Standalone has no equivalent persistent config store.
+SUPERVISOR_MODE = SUPERVISOR_TOKEN is not None
 RADIO_BROWSER_STATIC_BASES = [
     "https://de1.api.radio-browser.info",
     "https://nl1.api.radio-browser.info",
@@ -303,6 +308,24 @@ border-color:var(--success)}
 .empty{text-align:center;padding:32px;color:var(--muted)}
 .ha-info{background:#1a237e;border-radius:8px;padding:10px 14px;margin-bottom:16px;
 font-size:.85rem;color:#bbdefb;display:flex;align-items:center;gap:8px}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;
+align-items:center;justify-content:center;z-index:100;padding:16px}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:12px;
+padding:20px;max-width:360px;width:100%}
+.modal h2{font-size:1.05rem;margin-bottom:10px}
+.modal-station{font-size:.85rem;color:var(--muted);margin-bottom:14px;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.modal label{display:block;font-size:.8rem;color:var(--muted);margin:10px 0 4px}
+.modal select{width:100%;padding:8px 10px;border:1px solid var(--border);
+border-radius:8px;background:var(--bg);color:var(--text);font-size:.9rem}
+.modal-status{font-size:.8rem;margin-top:10px;min-height:1.1em}
+.modal-status.error{color:#ef5350}
+.modal-status.ok{color:var(--success)}
+.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.modal-actions button{padding:8px 16px;border-radius:8px;font-size:.85rem;
+cursor:pointer;border:1px solid var(--border)}
+.btn-secondary{background:transparent;color:var(--text)}
+.btn-primary{background:var(--accent);color:#000;font-weight:700;border-color:var(--accent)}
 </style>
 </head>
 <body>
@@ -332,6 +355,22 @@ font-size:.85rem;color:#bbdefb;display:flex;align-items:center;gap:8px}
 </div>
 <div id="results">
   <div class="empty">Gib einen Suchbegriff ein und drücke Suchen.</div>
+</div>
+
+<div id="presetModal" class="modal-overlay" style="display:none">
+  <div class="modal">
+    <h2>💾 Preset speichern</h2>
+    <p class="modal-station" id="modalStationName"></p>
+    <label>Lautsprecher</label>
+    <select id="modalSpeaker"></select>
+    <label>Preset-Slot</label>
+    <select id="modalSlot"></select>
+    <div class="modal-status" id="modalStatus"></div>
+    <div class="modal-actions">
+      <button id="modalCancel" class="btn-secondary">Abbrechen</button>
+      <button id="modalSave" class="btn-primary">Speichern</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -365,7 +404,7 @@ async function doSearch(){
   }
 }
 
-function searchApiUrl(params){
+function apiBase(){
   const path=window.location.pathname;
   let base=path;
   if(base.endsWith('/radio-search/')){
@@ -375,13 +414,29 @@ function searchApiUrl(params){
   }else if(!base.endsWith('/')){
     base+='/';
   }
-  return base+'api/search?'+params;
+  return base+'api/';
 }
+function searchApiUrl(params){return apiBase()+'search?'+params}
+function speakersApiUrl(){return apiBase()+'speakers'}
+function presetApiUrl(deviceId,n){return apiBase()+'presets/'+encodeURIComponent(deviceId)+'/'+n}
 
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 
+// "Save as preset" only exists when running as a HA add-on (Supervisor can
+// persist it); /api/speakers reports [] (or a non-ok status) otherwise, and
+// we simply never render the save button. See SUPERVISOR_MODE in bridge.py.
+let SPEAKERS=[];
+async function loadSpeakers(){
+  try{
+    const r=await fetch(speakersApiUrl());
+    SPEAKERS=r.ok?await r.json():[];
+  }catch(_e){SPEAKERS=[]}
+}
+loadSpeakers();
+
 function renderResults(stations){
   if(!stations.length){resultsDiv.innerHTML='<div class="empty">Keine Ergebnisse gefunden.</div>';return}
+  const canSave=SPEAKERS.length>0;
   const html=stations.map(s=>{
     const n=esc(s.name||'Unbekannt');
     const u=esc(s.url_resolved||s.url||'');
@@ -391,7 +446,7 @@ function renderResults(stations){
     const t=(s.tags||'').split(',').filter(Boolean).slice(0,3).map(esc).join(', ');
     const cc=s.click_count||0;
     const img=f?'<img class="favicon" src="'+f+'" alt="">':'<div class="favicon" style="background:#222;display:flex;align-items:center;justify-content:center;font-size:24px;">🎵</div>';
-    return `<div class="station-card">
+    return `<div class="station-card" data-url="${u}" data-name="${n}" data-favicon="${f}">
       ${img}
       <div class="info">
         <div class="name">${n}</div>
@@ -404,6 +459,7 @@ function renderResults(stations){
       </div>
       <div class="actions">
         <button class="copy-btn" data-url="${u}">URL kopieren</button>
+        ${canSave?'<button class="save-btn">💾 Preset</button>':''}
       </div>
     </div>`;
   }).join('');
@@ -412,14 +468,25 @@ function renderResults(stations){
 
 // Event delegation — no inline onclick, no escaping hell
 resultsDiv.addEventListener('click',function(e){
-  const btn=e.target.closest('.copy-btn');
-  if(!btn)return;
-  const url=btn.getAttribute('data-url');
-  btn.textContent='✓ Kopiert!';btn.classList.add('copied');
-  setTimeout(()=>{btn.textContent='URL kopieren';btn.classList.remove('copied')},2000);
-  if(navigator.clipboard&&navigator.clipboard.writeText){
-    navigator.clipboard.writeText(url).catch(()=>{fallbackCopy(url)});
-  }else{fallbackCopy(url)}
+  const copyBtn=e.target.closest('.copy-btn');
+  if(copyBtn){
+    const url=copyBtn.getAttribute('data-url');
+    copyBtn.textContent='✓ Kopiert!';copyBtn.classList.add('copied');
+    setTimeout(()=>{copyBtn.textContent='URL kopieren';copyBtn.classList.remove('copied')},2000);
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(url).catch(()=>{fallbackCopy(url)});
+    }else{fallbackCopy(url)}
+    return;
+  }
+  const saveBtn=e.target.closest('.save-btn');
+  if(saveBtn){
+    const card=saveBtn.closest('.station-card');
+    openPresetModal({
+      name: card.getAttribute('data-name'),
+      url: card.getAttribute('data-url'),
+      favicon: card.getAttribute('data-favicon'),
+    });
+  }
 });
 
 function fallbackCopy(url){
@@ -428,6 +495,80 @@ function fallbackCopy(url){
   document.body.appendChild(ta);ta.select();document.execCommand('copy');
   document.body.removeChild(ta);
 }
+
+// ---------- save-as-preset modal --------------------------------------
+
+const modal=document.getElementById('presetModal');
+const modalStationName=document.getElementById('modalStationName');
+const modalSpeaker=document.getElementById('modalSpeaker');
+const modalSlot=document.getElementById('modalSlot');
+const modalStatus=document.getElementById('modalStatus');
+const modalSave=document.getElementById('modalSave');
+const modalCancel=document.getElementById('modalCancel');
+let currentStation=null;
+
+function openPresetModal(station){
+  currentStation=station;
+  modalStationName.textContent=station.name;
+  modalStatus.textContent='';
+  modalStatus.className='modal-status';
+  modalSpeaker.innerHTML=SPEAKERS.map(s=>`<option value="${s.device_id}">${esc(s.friendly)}</option>`).join('');
+  fillSlotOptions();
+  modal.style.display='flex';
+}
+
+function fillSlotOptions(){
+  const speaker=SPEAKERS.find(s=>s.device_id===modalSpeaker.value)||SPEAKERS[0];
+  const presets=speaker?speaker.presets:{};
+  modalSlot.innerHTML='';
+  for(let i=1;i<=6;i++){
+    const p=presets[String(i)];
+    const label=(p&&p.url)?`Preset ${i}: ${p.name||p.url}`:`Preset ${i} (frei)`;
+    const opt=document.createElement('option');
+    opt.value=i;opt.textContent=label;
+    modalSlot.appendChild(opt);
+  }
+}
+
+modalSpeaker.addEventListener('change',fillSlotOptions);
+modalCancel.addEventListener('click',()=>{modal.style.display='none'});
+
+async function doSavePreset(confirmOverwrite){
+  const deviceId=modalSpeaker.value;
+  const n=modalSlot.value;
+  modalStatus.className='modal-status';
+  modalStatus.textContent='Speichere...';
+  modalSave.disabled=true;
+  try{
+    const r=await fetch(presetApiUrl(deviceId,n),{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url:currentStation.url,name:currentStation.name,favicon:currentStation.favicon,confirm:!!confirmOverwrite}),
+    });
+    if(r.status===409){
+      const data=await r.json();
+      const existingLabel=(data.existing&&(data.existing.name||data.existing.url))||'ein Sender';
+      modalSave.disabled=false;
+      if(confirm(`Preset ${n} ist bereits belegt mit "${existingLabel}". Überschreiben?`)){
+        return doSavePreset(true);
+      }
+      modalStatus.textContent='Abgebrochen.';
+      return;
+    }
+    const data=await r.json();
+    if(!r.ok||data.error){throw new Error(data.error||'Speichern fehlgeschlagen')}
+    modalStatus.className='modal-status ok';
+    modalStatus.textContent=data.stuck?'✓ Gespeichert.':'✓ Gespeichert (Gerät hat den Slot evtl. nicht bestätigt).';
+    setTimeout(()=>{modal.style.display='none'},1500);
+  }catch(e){
+    modalStatus.className='modal-status error';
+    modalStatus.textContent='❌ '+e.message;
+  }finally{
+    modalSave.disabled=false;
+  }
+}
+
+modalSave.addEventListener('click',()=>doSavePreset(false));
 </script>
 </body>
 </html>
@@ -539,6 +680,9 @@ def _search_stations(query: str, country: str = "", sort: str = "votes") -> list
     raise RadioSearchError("radio-browser currently unreachable: " + " | ".join(errors[-3:]))
 
 
+_PRESET_SAVE_RE = re.compile(r"^(?:" + re.escape(RADIO_SEARCH_PATH) + r")?/api/presets/([^/]+)/([1-6])$")
+
+
 class _RadioSearchHandler(BaseHTTPRequestHandler):
     """HTTP handler for the radio search web UI."""
 
@@ -564,9 +708,87 @@ class _RadioSearchHandler(BaseHTTPRequestHandler):
                 self._json_response(502, {"error": str(e)})
                 return
             self._json_response(200, stations)
+        elif path == "/api/speakers" or path.startswith(RADIO_SEARCH_PATH + "/api/speakers"):
+            # "Save as preset" is a Supervisor-only feature: standalone Docker
+            # has no persistent config store to save it into (see
+            # SUPERVISOR_MODE). Reporting no speakers here is what makes the
+            # frontend hide the feature entirely rather than half-working.
+            if not SUPERVISOR_MODE:
+                self._json_response(501, {"error": "only available when running as a Home Assistant add-on"})
+                return
+            registry = getattr(self.server, "speaker_registry", None) or {}
+            out = [
+                {
+                    "device_id": device_id,
+                    "friendly": s["friendly"],
+                    "presets": {
+                        str(n): {"name": e.get("name") or "", "url": e.get("url") or ""}
+                        for n, e in s["presets"].items()
+                    },
+                }
+                for device_id, s in registry.items()
+            ]
+            self._json_response(200, out)
         else:
             self.send_response(404)
             self.end_headers()
+
+    def do_POST(self):
+        path = urllib.parse.urlparse(self.path).path
+        m = _PRESET_SAVE_RE.match(path)
+        if not m:
+            self.send_response(404)
+            self.end_headers()
+            return
+        if not SUPERVISOR_MODE:
+            self._json_response(501, {"error": "only available when running as a Home Assistant add-on"})
+            return
+
+        device_id, n = m.group(1), int(m.group(2))
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except Exception:
+            self._json_response(400, {"error": "invalid JSON body"})
+            return
+
+        url = (payload.get("url") or "").strip()
+        if not url:
+            self._json_response(400, {"error": "missing url"})
+            return
+        name = payload.get("name") or ""
+        favicon = payload.get("favicon") or ""
+        confirm = bool(payload.get("confirm"))
+
+        registry = getattr(self.server, "speaker_registry", None) or {}
+        speaker = registry.get(device_id)
+        if not speaker:
+            self._json_response(404, {"error": f"unknown or not-yet-ready speaker {device_id}"})
+            return
+
+        existing = speaker["presets"].get(n)
+        if existing and existing.get("url") and not confirm:
+            self._json_response(409, {
+                "conflict": True,
+                "existing": {"name": existing.get("name") or "", "url": existing["url"]},
+            })
+            return
+
+        try:
+            stuck = save_preset_live(speaker["host"], speaker["av"], speaker["rc"], n, url, speaker["proxy_port"])
+        except Exception as e:
+            print(f"[search] writing preset {n} to {speaker['friendly']} failed: {e}")
+            self._json_response(502, {"error": f"failed to write preset to speaker: {e}"})
+            return
+
+        # Same dict object play_preset() closes over — updates take effect on
+        # the very next press/MQTT command, no restart needed.
+        speaker["presets"][n] = {"url": url, "name": name, "favicon": favicon}
+        if not stuck:
+            print(f"[search] preset {n} for {speaker['friendly']} written but device didn't confirm it stuck")
+
+        persisted = persist_preset_to_supervisor(speaker["host"], speaker["friendly"], n, url, speaker["presets"])
+        self._json_response(200, {"ok": True, "stuck": stuck, "persisted": persisted})
 
     def _json_response(self, code: int, data):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -581,13 +803,14 @@ class _RadioSearchHandler(BaseHTTPRequestHandler):
         pass
 
 
-def start_radio_search_server(port: int = RADIO_SEARCH_PORT) -> ThreadingHTTPServer | None:
+def start_radio_search_server(port: int = RADIO_SEARCH_PORT, speaker_registry: dict | None = None) -> ThreadingHTTPServer | None:
     """Start the radio search web UI server.
 
     Returns the server object or None on failure.
     """
     try:
         server = ThreadingHTTPServer(("0.0.0.0", port), _RadioSearchHandler)
+        server.speaker_registry = speaker_registry if speaker_registry is not None else {}  # type: ignore[attr-defined]
         t = threading.Thread(target=server.serve_forever, daemon=True, name="radio-search")
         t.start()
         print(f"[search] radio search listening on 0.0.0.0:{port}")
@@ -990,6 +1213,28 @@ def _current_preset_url(host: str, n: int) -> str | None:
     return loc.group(1) if loc else None
 
 
+def _write_single_preset(host: str, av, n: int, url: str) -> str | None:
+    """Push one URL onto a preset slot via the long-press-save dance and
+    return what the device reports storing there afterwards (for the caller
+    to compare against `url`). Caller is responsible for muting/unmuting."""
+    try:
+        av.Stop(InstanceID=0)
+    except Exception:
+        pass
+    time.sleep(0.4)
+    # IMPORTANT: empty CurrentURIMetaData. With DIDL, the speaker marks
+    # the now-playing item as isPresetable="false" and silently ignores
+    # the long-press save. The bridge applies DIDL at runtime in play_preset().
+    av.SetAVTransportURI(InstanceID=0, CurrentURI=url, CurrentURIMetaData="")
+    av.Play(InstanceID=0, Speed="1")
+    time.sleep(3.5)
+    _key(host, "press", f"PRESET_{n}")
+    time.sleep(0.8)
+    _key(host, "release_after_hold", f"PRESET_{n}")
+    time.sleep(2.0)
+    return _current_preset_url(host, n)
+
+
 def sync_presets(host: str, av, rc, presets: dict, tag: str = "", proxy_port: int | None = None):
     """Save each configured preset onto the speaker so physical button presses
     emit a WebSocket event the bridge can intercept. Skips slots already in
@@ -1009,22 +1254,7 @@ def sync_presets(host: str, av, rc, presets: dict, tag: str = "", proxy_port: in
         for n, url in rewritten.items():
             if n not in needed:
                 continue
-            try:
-                av.Stop(InstanceID=0)
-            except Exception:
-                pass
-            time.sleep(0.4)
-            # IMPORTANT: empty CurrentURIMetaData. With DIDL, the speaker marks
-            # the now-playing item as isPresetable="false" and silently ignores
-            # the long-press save. The bridge applies DIDL at runtime in play_preset().
-            av.SetAVTransportURI(InstanceID=0, CurrentURI=url, CurrentURIMetaData="")
-            av.Play(InstanceID=0, Speed="1")
-            time.sleep(3.5)
-            _key(host, "press", f"PRESET_{n}")
-            time.sleep(0.8)
-            _key(host, "release_after_hold", f"PRESET_{n}")
-            time.sleep(2.0)
-            stored = _current_preset_url(host, n)
+            stored = _write_single_preset(host, av, n, url)
             if stored == url:
                 print(f"[sync{tag}]  ✓ preset {n} -> {url}")
             else:
@@ -1036,6 +1266,24 @@ def sync_presets(host: str, av, rc, presets: dict, tag: str = "", proxy_port: in
     finally:
         rc.SetMute(InstanceID=0, Channel="Master", DesiredMute="0")
         print(f"[sync{tag}] unmuted, volume {saved_vol}")
+
+
+def save_preset_live(host: str, av, rc, n: int, url: str, proxy_port: int | None) -> bool:
+    """Write a single preset onto the speaker right now (used by the radio
+    search UI's "save as preset" action) and return whether it stuck. Mutes
+    for the duration like sync_presets(), but only touches the one slot."""
+    rewritten = rewrite_url_for_proxy(url, proxy_port)
+    saved_vol = int(rc.GetVolume(InstanceID=0, Channel="Master")["CurrentVolume"])
+    rc.SetMute(InstanceID=0, Channel="Master", DesiredMute="1")
+    try:
+        stored = _write_single_preset(host, av, n, rewritten)
+        try:
+            av.Stop(InstanceID=0)
+        except Exception:
+            pass
+        return stored == rewritten
+    finally:
+        rc.SetMute(InstanceID=0, Channel="Master", DesiredMute="0")
 
 
 # ---------- MQTT -----------------------------------------------------------
@@ -1062,6 +1310,68 @@ def fetch_mqtt_creds() -> dict | None:
         "username": os.environ.get("MQTT_USERNAME", ""),
         "password": os.environ.get("MQTT_PASSWORD", ""),
     }
+
+
+# ---------- Supervisor self-options (persist presets from the search UI) ---
+
+
+def _supervisor_request(method: str, path: str, body: dict | None = None) -> dict | None:
+    req = urllib.request.Request(
+        f"{SUPERVISOR_URL}/addons/self/{path}",
+        data=json.dumps(body).encode() if body is not None else None,
+        method=method,
+        headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.load(r).get("data")
+
+
+def _build_updated_speakers_list(
+    raw_speakers: list[dict], host: str, friendly: str, n: int, url: str, live_presets: dict[int, dict]
+) -> list[dict]:
+    """Return `raw_speakers` (the persisted `speakers:` option) with preset
+    `n` set to `url` for the speaker at `host`.
+
+    Updates the matching entry in place if one exists (by `host`, or by
+    `name` for entries that predate having a host). If no explicit entry
+    claims this speaker yet — it was only getting presets via the wildcard —
+    a new host-pinned entry is created, seeded with all of its *current*
+    effective presets (not just the one being changed). Without that, adding
+    an explicit entry would make this speaker stop matching the wildcard and
+    silently drop its other five presets on the next restart.
+    """
+    updated = [dict(e) for e in raw_speakers]
+    for entry in updated:
+        entry_host = (entry.get("host") or "").strip()
+        entry_name = (entry.get("name") or "").strip()
+        matches = (entry_host and entry_host == host) or (not entry_host and entry_name.lower() == friendly.lower())
+        if matches:
+            entry[f"preset_{n}_url"] = url
+            return updated
+    new_entry = {"host": host}
+    for i in range(1, 7):
+        new_entry[f"preset_{i}_url"] = live_presets.get(i, {}).get("url", "")
+    new_entry[f"preset_{n}_url"] = url
+    updated.append(new_entry)
+    return updated
+
+
+def persist_preset_to_supervisor(host: str, friendly: str, n: int, url: str, live_presets: dict[int, dict]) -> bool:
+    """Save preset `n` = `url` into the add-on's own persisted config via the
+    Supervisor API, so it survives restarts. Only called when SUPERVISOR_MODE
+    is true. Failure here doesn't undo the live write to the speaker — it
+    just means the change won't survive a restart, which is logged."""
+    try:
+        info = _supervisor_request("GET", "info")
+        options = dict((info or {}).get("options") or {})
+        options["speakers"] = _build_updated_speakers_list(
+            options.get("speakers") or [], host, friendly, n, url, live_presets
+        )
+        _supervisor_request("POST", "options", {"options": options})
+        return True
+    except Exception as e:
+        print(f"[search] persisting preset to Supervisor config failed (live write still applied): {e}")
+        return False
 
 
 def publish_discovery(client: mqtt.Client, device_id: str, friendly: str, model: str, presets: dict):
@@ -1096,7 +1406,14 @@ def publish_discovery(client: mqtt.Client, device_id: str, friendly: str, model:
 # ---------- per-speaker runner --------------------------------------------
 
 
-def run_speaker(speaker: dict, sync_on_startup: bool, mqtt_client, play_registry: dict, proxy_port: int | None):
+def run_speaker(
+    speaker: dict,
+    sync_on_startup: bool,
+    mqtt_client,
+    play_registry: dict,
+    proxy_port: int | None,
+    speaker_registry: dict,
+):
     """Per-speaker worker: resolve UPnP services, optionally sync presets,
     register the play callback, publish MQTT discovery, then run the WebSocket
     loop forever with reconnect. Intended to run inside its own thread."""
@@ -1145,6 +1462,19 @@ def run_speaker(speaker: dict, sync_on_startup: bool, mqtt_client, play_registry
             print(f"[play{tag}] failed: {e}")
 
     play_registry[device_id] = play_preset
+
+    # Exposes live UPnP handles + the same mutable `presets` dict play_preset
+    # reads from, so the radio search UI's "save as preset" action can write
+    # a new preset without restarting this thread. Supervisor-only feature —
+    # see save_preset_live() / persist_preset_to_supervisor().
+    speaker_registry[device_id] = {
+        "host": host,
+        "friendly": friendly,
+        "av": av,
+        "rc": rc,
+        "presets": presets,
+        "proxy_port": proxy_port,
+    }
 
     if mqtt_client is not None:
         publish_discovery(mqtt_client, device_id, friendly, speaker["model"], presets)
@@ -1270,11 +1600,17 @@ def _setup_mqtt(resolved: list[dict], play_registry: dict):
 def main():
     cfg = load_options()
 
+    # Populated by run_speaker() threads as each speaker comes online; read by
+    # the radio search UI's "save as preset" endpoint (Supervisor-mode only).
+    # Created before the search server so the same dict is shared even if no
+    # speakers ever resolve (server just reports an empty speaker list).
+    speaker_registry: dict[str, dict] = {}
+
     # Start radio search web UI before speaker resolution so Home Assistant
     # Ingress remains available even when presets/speakers still need setup.
     radio_search_server: ThreadingHTTPServer | None = None
     try:
-        radio_search_server = start_radio_search_server()
+        radio_search_server = start_radio_search_server(speaker_registry=speaker_registry)
     except Exception as e:
         print(f"[search] failed to start: {e}")
 
@@ -1317,7 +1653,7 @@ def main():
     for speaker in resolved:
         t = threading.Thread(
             target=run_speaker,
-            args=(speaker, sync_on_startup, mqtt_client, play_registry, proxy_port),
+            args=(speaker, sync_on_startup, mqtt_client, play_registry, proxy_port, speaker_registry),
             name=f"speaker-{speaker['friendly']}",
             daemon=True,
         )

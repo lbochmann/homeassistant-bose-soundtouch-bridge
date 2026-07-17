@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.9.1
+
+- **Save a search result directly as a preset (Supervisor add-on only).**
+  Radio search results now get a "💾 Preset" button that writes the stream
+  straight onto a speaker's preset slot — no more copy/paste into the add-on
+  config and restart. Picks the speaker and slot 1–6 in a small dialog, warns
+  and asks for confirmation if the slot is already occupied, writes the
+  preset onto the physical speaker immediately (same long-press-save
+  mechanism as `sync_presets()`), and persists it into the add-on's own
+  config via the Supervisor API so it survives restarts.
+- This is deliberately unavailable in the standalone Docker image — there's
+  no persistent config store to save into outside Supervisor, so the button
+  simply doesn't appear (`/api/speakers` reports itself unavailable and the
+  UI hides the feature rather than half-working).
+
 ## 1.9.0
 
 - **Fix SSRF/local-file-read in the HTTPS stream proxy.** The proxy now
