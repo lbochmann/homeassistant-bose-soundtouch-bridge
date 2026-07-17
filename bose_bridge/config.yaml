@@ -1,6 +1,6 @@
 name: "Bose SoundTouch Bridge"
 description: "Revives preset buttons on Bose SoundTouch speakers after the Bose cloud retirement (2026). Manages every SoundTouch on the LAN from one instance — same presets on every speaker by default; add `speakers:` entries to override individual speakers."
-version: "1.8.1"
+version: "1.8.2"
 slug: "bose_bridge"
 url: "https://github.com/lbochmann/homeassistant-bose-soundtouch-bridge"
 init: false

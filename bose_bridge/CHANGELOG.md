@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.2
+
+- **Fix proxy logging.** Switched from `logging` module to `print()` so proxy
+  log lines actually appear in HA logs (HA captures `print()` but not the
+  Python `logging` module).
+
 ## 1.8.1
 
 - **Proxy logging.** Added comprehensive logging at every proxy failure
